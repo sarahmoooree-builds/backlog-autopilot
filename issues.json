@@ -1,0 +1,82 @@
+[
+  {
+    "id": 1042,
+    "title": "Login page returns 500 error when email contains a plus sign",
+    "description": "Users with emails like jane+work@example.com get a 500 Internal Server Error on the login page. The server logs show an unescaped character in the email validation regex. This affects roughly 2% of signups based on our analytics.",
+    "labels": ["bug", "auth", "P2"],
+    "age_days": 45,
+    "comments_count": 3
+  },
+  {
+    "id": 1078,
+    "title": "Dashboard CSV export includes deleted records",
+    "description": "When exporting dashboard data to CSV, rows that were soft-deleted still appear in the export. The query in export_service.py does not filter on the is_deleted flag. Expected behavior: only active records should be included.",
+    "labels": ["bug", "data-export"],
+    "age_days": 62,
+    "comments_count": 5
+  },
+  {
+    "id": 1105,
+    "title": "Add dark mode support across the platform",
+    "description": "Multiple customers have requested dark mode. This would require updating the design system tokens, all component themes, and adding a user preference toggle. We should also consider OS-level preference detection.",
+    "labels": ["feature-request", "design-system", "P3"],
+    "age_days": 120,
+    "comments_count": 14
+  },
+  {
+    "id": 1112,
+    "title": "Tooltip text is truncated on the billing summary page",
+    "description": "The tooltip on the 'Total charges' row in the billing summary gets cut off when the text is longer than 40 characters. Likely a CSS max-width issue on the tooltip container. Screenshot attached in the original issue.",
+    "labels": ["bug", "UI", "billing"],
+    "age_days": 30,
+    "comments_count": 1
+  },
+  {
+    "id": 1134,
+    "title": "Refactor notification service to use event-driven architecture",
+    "description": "Our current notification service uses synchronous HTTP calls to send emails and push notifications. We should migrate to an event-driven model using a message queue. This will improve reliability and decouple services. Requires evaluating RabbitMQ vs Kafka and updating 4-5 downstream consumers.",
+    "labels": ["tech-debt", "architecture", "notifications"],
+    "age_days": 95,
+    "comments_count": 8
+  },
+  {
+    "id": 1156,
+    "title": "Fix broken pagination on the audit log page",
+    "description": "The audit log page shows only the first 25 entries and the 'Next' button does nothing. Console shows a JS error: 'Cannot read property offset of undefined'. The pagination component works on other pages, so this is likely a prop-passing issue specific to the audit log view.",
+    "labels": ["bug", "audit", "P2"],
+    "age_days": 38,
+    "comments_count": 4
+  },
+  {
+    "id": 1170,
+    "title": "Investigate slow response times on the /api/reports endpoint",
+    "description": "The /api/reports endpoint is averaging 4.2s response time, up from 800ms last quarter. Needs investigation. Could be a missing index, an N+1 query, or increased data volume. No clear root cause yet.",
+    "labels": ["performance", "investigation", "API"],
+    "age_days": 55,
+    "comments_count": 6
+  },
+  {
+    "id": 1198,
+    "title": "Update error messages to follow new copy guidelines",
+    "description": "Product and content teams published new error message guidelines (see Confluence doc). We need to update all user-facing error strings to match the new tone and format. There are approximately 80+ error messages across 12 modules.",
+    "labels": ["tech-debt", "UX-copy"],
+    "age_days": 70,
+    "comments_count": 2
+  },
+  {
+    "id": 1203,
+    "title": "Webhook retry logic does not respect exponential backoff",
+    "description": "The webhook delivery system retries failed webhooks every 10 seconds regardless of failure count. It should use exponential backoff: 10s, 30s, 90s, 270s. The retry logic is in webhook_dispatcher.py line 45. Currently it hardcodes the interval.",
+    "labels": ["bug", "webhooks", "integrations"],
+    "age_days": 42,
+    "comments_count": 3
+  },
+  {
+    "id": 1221,
+    "title": "Build a Slack integration for real-time alert notifications",
+    "description": "We want to send alert notifications to customer Slack channels. This requires building an OAuth flow for Slack, a channel selector UI, message formatting templates, and a delivery pipeline. Should support both public and private channels.",
+    "labels": ["feature-request", "integrations", "Slack"],
+    "age_days": 85,
+    "comments_count": 11
+  }
+]
