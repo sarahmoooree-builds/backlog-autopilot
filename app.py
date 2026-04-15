@@ -18,8 +18,8 @@ from mock_executor import execute_issues
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
-    page_title="Backlog Autopilot",
-    page_icon="🚀",
+    page_title="Backlog Autopilot — FinServ Co.",
+    page_icon="📊",
     layout="wide",
 )
 
@@ -55,12 +55,15 @@ if "execution_results" not in st.session_state:
 
 
 # ---------------------------------------------------------------------------
-# Header
+# Header — FinServ Co. branding
 # ---------------------------------------------------------------------------
+
+# Display the FinServ Co. logo
+st.image("finserv_logo.svg", width=280)
 
 st.title("Backlog Autopilot")
 st.markdown(
-    "Turn a wall of stale GitHub issues into an actionable pipeline. "
+    "**FinServ Co. Engineering** — Turn 300+ stale GitHub issues into an actionable pipeline. "
     "Issues are enriched, scored, and recommended for autonomous resolution — "
     "you approve, the system executes."
 )
@@ -216,6 +219,6 @@ else:
 
 st.divider()
 st.caption(
-    "Backlog Autopilot MVP — Execution is currently mocked. "
-    "In production, approved issues are sent to an AI agent (e.g. Devin) for resolution."
+    "Backlog Autopilot MVP — Built for FinServ Co. | "
+    "Execution is currently mocked. In production, approved issues are sent to Devin for resolution."
 )
