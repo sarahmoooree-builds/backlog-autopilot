@@ -63,9 +63,8 @@ st.image("finserv_logo.svg", width=280)
 
 st.title("Backlog Autopilot")
 st.markdown(
-    "**FinServ Co. Engineering** — Turn 300+ stale GitHub issues into an actionable pipeline. "
+    "**FinServ Co. Engineering**"
     "Issues are enriched, scored, and recommended for autonomous resolution — "
-    "you approve, the system executes."
 )
 
 st.divider()
@@ -97,7 +96,7 @@ st.divider()
 
 st.header("Recommended for Automation")
 st.caption(
-    "These issues scored well on clarity, scope, and complexity. "
+    "These issues are recommended to automate based on scope and complexity. "
     "Select the ones you'd like to send to the execution pipeline."
 )
 
