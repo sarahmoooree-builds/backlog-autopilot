@@ -14,6 +14,8 @@ from github_client import fetch_issues, fetch_pull_requests
 from scorer import enrich_issues
 from executor import execute_issues, refresh_session_statuses
 from state import is_dispatched, get_all_sessions, get_session
+from triage_store import get_triage, is_triaged, confidence_label
+from triager import triage_issue, triage_issues
 
 
 # ---------------------------------------------------------------------------
@@ -140,13 +142,29 @@ with tab_pipeline:
 
     # --- Issues for Automation ---
     st.header("Issues for Automation")
-    st.caption("Recommended based on scope, complexity, and risk. Select to dispatch to Devin.")
+    st.caption("Recommended based on scope, complexity, and risk. Triage with Devin for a confidence score before dispatching.")
 
     if not recommended:
         st.info("No issues are currently recommended for automation.")
     else:
+        # --- Triage All button ---
+        not_yet_triaged = [i for i in recommended if not is_triaged(i["id"])]
+        triage_col, triage_spacer = st.columns([2, 8])
+        with triage_col:
+            if not_yet_triaged:
+                if st.button("Triage All with Devin", help="Run Devin triage on all un-triaged recommended issues"):
+                    with st.spinner(f"Triaging {len(not_yet_triaged)} issue(s) with Devin... this may take a minute."):
+                        triage_issues(not_yet_triaged)
+                    st.rerun()
+            else:
+                st.caption("All issues triaged")
+
+        st.markdown("")
+
         for issue in recommended:
             already_sent = is_dispatched(issue["id"])
+            triage = get_triage(issue["id"])
+
             col_check, col_info = st.columns([0.5, 9.5])
 
             with col_check:
@@ -161,9 +179,57 @@ with tab_pipeline:
 
             with col_info:
                 session = get_session(issue["id"]) if already_sent else None
-                tag = f"  ·  {session['status']}" if session else ""
+                dispatch_tag = f"  ·  {session['status']}" if session else ""
 
-                with st.expander(f"#{issue['id']} — {issue['title']}{tag}"):
+                # Build confidence badge for expander title
+                if triage and "confidence_score" in triage:
+                    score = triage["confidence_score"]
+                    label, _ = confidence_label(score)
+                    confidence_tag = f"  ·  {label} ({score}%)"
+                else:
+                    confidence_tag = ""
+
+                with st.expander(f"#{issue['id']} — {issue['title']}{confidence_tag}{dispatch_tag}"):
+                    # --- Triage report (if available) ---
+                    if triage and "error" not in triage:
+                        score = triage["confidence_score"]
+                        label, color = confidence_label(score)
+
+                        st.markdown(
+                            f"<div style='background:{color}20; border-left: 4px solid {color}; padding: 10px 14px; border-radius: 4px; margin-bottom: 12px;'>"
+                            f"<strong style='color:{color}'>Devin Confidence: {score}/100 — {label}</strong><br>"
+                            f"<span style='font-size:0.9em'>{triage['confidence_reasoning']}</span>"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                        tr1, tr2 = st.columns(2)
+                        with tr1:
+                            st.markdown("**Root Cause Hypothesis**")
+                            st.markdown(triage["root_cause_hypothesis"])
+                            st.markdown("**Affected Files**")
+                            for f in triage.get("affected_files", []):
+                                st.markdown(f"- `{f}`")
+                            st.caption(f"Estimated lines changed: {triage.get('estimated_lines_changed', '?')}")
+
+                        with tr2:
+                            st.markdown("**Next Steps**")
+                            for i, step in enumerate(triage.get("next_steps", []), 1):
+                                st.markdown(f"{i}. {step}")
+
+                        st.divider()
+
+                    elif triage and "error" in triage:
+                        st.warning(f"Triage failed: {triage['error']}")
+
+                    else:
+                        # No triage yet — show triage button inline
+                        if st.button("Triage with Devin", key=f"triage_{issue['id']}"):
+                            with st.spinner("Devin is analyzing this issue..."):
+                                triage_issue(issue)
+                            st.rerun()
+
+                    # --- Standard enrichment fields ---
                     st.markdown(f"**Summary:** {issue['summary']}")
                     c1, c2, c3, c4 = st.columns(4)
                     c1.markdown(f"**Type:** `{issue['issue_type']}`")
