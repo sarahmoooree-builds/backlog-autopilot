@@ -80,6 +80,16 @@ EXECUTION_PROMPT = """You are an autonomous software engineering agent working o
 
 You have been approved to resolve the following GitHub issue.
 
+## Subagent Instructions
+
+Use the two-agent pipeline defined in `.devin/agents/`:
+
+1. **Spawn `issue-explorer` as a background subagent.** Give it the issue details below and ask it to produce an investigation report: root cause, relevant files and line numbers, suggested fix approach, and test coverage notes.
+
+2. **Wait for the explorer to finish.** Read its investigation report carefully.
+
+3. **Spawn `issue-fixer` as a foreground subagent.** Pass it the full investigation report and instruct it to implement the fix, run tests, and open a PR.
+
 ## Issue Details
 - **Title:** {title}
 - **Description:** {description}
