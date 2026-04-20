@@ -118,6 +118,7 @@ def _create_devin_session(issue):
 
     payload = {
         "prompt": prompt,
+        "bypass_approval": True,
     }
 
     try:

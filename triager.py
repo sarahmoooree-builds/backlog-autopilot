@@ -51,7 +51,7 @@ def triage_issue(issue):
         response = requests.post(
             f"{DEVIN_API_BASE}/sessions",
             headers=headers,
-            json={"prompt": prompt},
+            json={"prompt": prompt, "bypass_approval": True},
             timeout=30,
         )
     except requests.exceptions.RequestException as e:
