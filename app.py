@@ -153,8 +153,14 @@ with tab_pipeline:
         with triage_col:
             if not_yet_triaged:
                 if st.button("Triage All with Devin", help="Run Devin triage on all un-triaged recommended issues"):
-                    with st.spinner(f"Triaging {len(not_yet_triaged)} issue(s) with Devin... this may take a minute."):
-                        triage_issues(not_yet_triaged)
+                    try:
+                        with st.spinner(f"Triaging {len(not_yet_triaged)} issue(s) with Devin... this takes 4–6 minutes per issue."):
+                            results = triage_issues(not_yet_triaged)
+                        errors = [r for r in results.values() if isinstance(r, dict) and r.get("status") == "error"]
+                        if errors:
+                            st.warning(f"{len(errors)} issue(s) failed to triage. See each issue for details.")
+                    except Exception as e:
+                        st.error(f"Triage error: {str(e)}")
                     st.rerun()
             else:
                 st.caption("All issues triaged")
@@ -186,12 +192,37 @@ with tab_pipeline:
                     score = triage["confidence_score"]
                     label, _ = confidence_label(score)
                     confidence_tag = f"  ·  {label} ({score}%)"
+                elif triage and triage.get("status") == "pending":
+                    confidence_tag = "  ·  Triaging..."
+                elif triage and triage.get("status") == "error":
+                    confidence_tag = "  ·  Triage Failed"
                 else:
                     confidence_tag = ""
 
                 with st.expander(f"#{issue['id']} — {issue['title']}{confidence_tag}{dispatch_tag}"):
                     # --- Triage report (if available) ---
-                    if triage and "error" not in triage:
+                    if triage and triage.get("status") == "pending":
+                        # Session was created but still running
+                        session_url = triage.get("session_url", "")
+                        st.info(f"Devin is analyzing this issue... [{session_url}]({session_url})")
+
+                    elif triage and triage.get("status") == "error":
+                        # Triage failed — show error and retry button
+                        st.warning(f"Triage failed: {triage.get('error', 'Unknown error')}")
+                        if triage.get("session_url"):
+                            st.markdown(f"[View Devin session]({triage['session_url']})")
+                        if st.button("Retry Triage", key=f"retry_{issue['id']}"):
+                            from triage_store import clear_triage
+                            clear_triage(issue["id"])
+                            try:
+                                with st.spinner("Devin is analyzing this issue..."):
+                                    triage_issue(issue)
+                            except Exception as e:
+                                st.error(f"Triage error: {str(e)}")
+                            st.rerun()
+
+                    elif triage and "confidence_score" in triage:
+                        # Full triage result available
                         score = triage["confidence_score"]
                         label, color = confidence_label(score)
 
@@ -211,22 +242,23 @@ with tab_pipeline:
                             for f in triage.get("affected_files", []):
                                 st.markdown(f"- `{f}`")
                             st.caption(f"Estimated lines changed: {triage.get('estimated_lines_changed', '?')}")
-
                         with tr2:
                             st.markdown("**Next Steps**")
                             for i, step in enumerate(triage.get("next_steps", []), 1):
                                 st.markdown(f"{i}. {step}")
+                        if triage.get("session_url"):
+                            st.markdown(f"[View Devin session]({triage['session_url']})")
 
                         st.divider()
-
-                    elif triage and "error" in triage:
-                        st.warning(f"Triage failed: {triage['error']}")
 
                     else:
                         # No triage yet — show triage button inline
                         if st.button("Triage with Devin", key=f"triage_{issue['id']}"):
-                            with st.spinner("Devin is analyzing this issue..."):
-                                triage_issue(issue)
+                            try:
+                                with st.spinner("Creating Devin triage session... (4–6 min to complete)"):
+                                    triage_issue(issue)
+                            except Exception as e:
+                                st.error(f"Triage error: {str(e)}")
                             st.rerun()
 
                     # --- Standard enrichment fields ---

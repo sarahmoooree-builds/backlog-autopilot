@@ -23,20 +23,20 @@ DEVIN_ORG_ID = os.getenv("DEVIN_ORG_ID")
 TARGET_REPO = "sarahmoooree-builds/finserv-platform"
 DEVIN_API_BASE = f"https://api.devin.ai/v3/organizations/{DEVIN_ORG_ID}"
 
-# How long to poll for a triage result (seconds)
-TRIAGE_TIMEOUT = 180
-POLL_INTERVAL = 8
+# How long to poll for a triage result (seconds) — Devin needs 4-6 minutes
+TRIAGE_TIMEOUT = 360
+POLL_INTERVAL = 10
 
 
 def triage_issue(issue):
     """
     Run a Devin triage session for a single issue.
 
-    Spawns a Devin session instructing it to use the issue-triager subagent,
-    polls until the session finishes, extracts the JSON report from the output,
-    and saves it to triage_store.json.
+    Creates a Devin session, polls until it finishes, extracts the JSON report,
+    and saves it to triage_store.json — including on failure, so the UI always
+    shows something after this call completes.
 
-    Returns the triage result dict, or None on failure.
+    Returns the triage result dict (may contain "status": "error" on failure).
     """
     prompt = _build_triage_prompt(issue)
 
@@ -45,7 +45,8 @@ def triage_issue(issue):
         "Content-Type": "application/json",
     }
 
-    # Create the triage session
+    # --- Step 1: Create the triage session ---
+    print(f"[triage] Creating Devin session for issue #{issue['id']}...")
     try:
         response = requests.post(
             f"{DEVIN_API_BASE}/sessions",
@@ -54,39 +55,84 @@ def triage_issue(issue):
             timeout=30,
         )
     except requests.exceptions.RequestException as e:
-        return {"error": f"Could not reach Devin API: {str(e)}"}
+        err = {"status": "error", "error": f"Could not reach Devin API: {str(e)}"}
+        record_triage(issue["id"], "unknown", err)
+        return err
 
     if response.status_code not in (200, 201):
-        return {"error": f"API error {response.status_code}: {response.text[:200]}"}
+        err = {"status": "error", "error": f"API returned {response.status_code}: {response.text[:200]}"}
+        record_triage(issue["id"], "unknown", err)
+        return err
 
-    session_id = response.json().get("session_id")
+    session_data = response.json()
+    session_id = session_data.get("session_id")
+    session_url = session_data.get("url", f"https://app.devin.ai/sessions/{session_id}")
+
     if not session_id:
-        return {"error": "No session_id returned from Devin API"}
+        err = {"status": "error", "error": "No session_id returned from Devin API"}
+        record_triage(issue["id"], "unknown", err)
+        return err
 
-    # Poll until finished or timeout
+    print(f"[triage] Session created: {session_url}")
+
+    # --- Step 2: Save a "pending" state immediately so UI shows progress ---
+    pending = {
+        "status": "pending",
+        "session_url": session_url,
+        "error": None,
+    }
+    record_triage(issue["id"], session_id, pending)
+
+    # --- Step 3: Poll until finished ---
     result = _poll_until_done(session_id, headers)
+
     if not result:
-        return {"error": f"Triage session {session_id} timed out or failed"}
+        err = {
+            "status": "error",
+            "session_url": session_url,
+            "error": f"Devin session timed out after {TRIAGE_TIMEOUT // 60} minutes. Session: {session_url}",
+        }
+        record_triage(issue["id"], session_id, err)
+        return err
 
-    # Extract the JSON triage report from the session output
+    final_status = result.get("status", "").lower()
+    if final_status == "blocked":
+        err = {
+            "status": "error",
+            "session_url": session_url,
+            "error": f"Devin session was blocked — may need human input. Session: {session_url}",
+        }
+        record_triage(issue["id"], session_id, err)
+        return err
+
+    # --- Step 4: Extract and save the triage JSON ---
     triage_data = _extract_triage_json(result)
-    if not triage_data:
-        return {"error": "Could not parse triage JSON from Devin output"}
 
-    # Persist to triage_store
+    if not triage_data:
+        err = {
+            "status": "error",
+            "session_url": session_url,
+            "error": f"Devin finished but triage JSON could not be parsed. Session: {session_url}",
+        }
+        record_triage(issue["id"], session_id, err)
+        return err
+
+    # Add the session URL to the result for easy linking
+    triage_data["session_url"] = session_url
     record_triage(issue["id"], session_id, triage_data)
+    print(f"[triage] Issue #{issue['id']} triaged. Confidence: {triage_data.get('confidence_score')}/100")
     return triage_data
 
 
 def triage_issues(issues):
     """
-    Triage a list of issues. Returns a dict of {issue_id: triage_result}.
-    Skips issues that have already been triaged.
+    Triage a list of issues. Skips already-triaged ones.
+    Returns a dict of {issue_id: triage_result}.
     """
     results = {}
     for issue in issues:
         existing = get_triage(issue["id"])
-        if existing:
+        if existing and existing.get("status") != "error":
             results[issue["id"]] = existing
             continue
         results[issue["id"]] = triage_issue(issue)
@@ -110,20 +156,23 @@ Use the `issue-triager` subagent (defined in .devin/agents/issue-triager/AGENT.m
 
 ## Instructions
 
-Spawn the issue-triager subagent in foreground mode. Provide it with the issue details above.
+Spawn the issue-triager subagent in foreground mode and give it the issue details above.
 
-When the subagent completes, output its JSON response as your final message — nothing else. Do not summarize, do not add commentary. Output only the raw JSON object.
+When the subagent finishes, output ONLY the raw JSON object it produced — no markdown, no commentary, no code blocks. Just the JSON.
 """
 
 
 def _poll_until_done(session_id, headers):
     """
-    Poll the Devin session until it reaches a terminal state.
-    Returns the final session dict, or None if timeout/failure.
+    Poll the Devin session every POLL_INTERVAL seconds until terminal state or timeout.
+    Prints status updates so you can see what's happening.
+    Returns the final session dict, or None on timeout.
     """
     deadline = time.time() + TRIAGE_TIMEOUT
+    attempt = 0
 
     while time.time() < deadline:
+        attempt += 1
         try:
             response = requests.get(
                 f"{DEVIN_API_BASE}/sessions/{session_id}",
@@ -132,49 +181,53 @@ def _poll_until_done(session_id, headers):
             )
             if response.status_code == 200:
                 session = response.json()
-                status = session.get("status", "").lower()
+                status = session.get("status", "unknown").lower()
+                print(f"[triage] Poll #{attempt}: status={status}")
                 if status in ("finished", "stopped", "blocked"):
                     return session
-        except requests.exceptions.RequestException:
-            pass
+            else:
+                print(f"[triage] Poll #{attempt}: HTTP {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            print(f"[triage] Poll #{attempt}: request error — {e}")
 
         time.sleep(POLL_INTERVAL)
 
+    print(f"[triage] Timed out after {TRIAGE_TIMEOUT}s ({attempt} polls)")
     return None
 
 
 def _extract_triage_json(session_data):
     """
     Extract the structured triage JSON from the Devin session output.
-
-    Devin should output only JSON as its final message. We look for a valid
-    JSON object containing 'confidence_score' in the structured output.
+    Looks in structured_output first, then scans messages for a JSON block.
     """
     required_fields = {
         "confidence_score", "confidence_reasoning", "root_cause_hypothesis",
         "affected_files", "estimated_lines_changed", "next_steps"
     }
 
-    # Try structured_output first (if Devin supports it)
+    # Try structured_output first
     structured = session_data.get("structured_output")
     if structured and isinstance(structured, dict):
         if required_fields.issubset(structured.keys()):
             return structured
 
-    # Fall back to scanning the session messages for a JSON block
+    # Scan messages in reverse (most recent first) for a JSON block
     messages = session_data.get("messages", [])
     for message in reversed(messages):
         content = message.get("content", "")
         if not content:
             continue
-        # Try to parse the whole content as JSON
+
+        # Try the whole content as JSON
         try:
             parsed = json.loads(content.strip())
             if required_fields.issubset(parsed.keys()):
                 return parsed
         except (json.JSONDecodeError, AttributeError):
             pass
-        # Try to extract a JSON block from within the content
+
+        # Try to find a JSON object within the content
         start = content.find("{")
         end = content.rfind("}") + 1
         if start >= 0 and end > start:
