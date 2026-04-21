@@ -380,6 +380,10 @@ with tab_pipeline:
         st.session_state.selected_goal = intent
         st.session_state.prioritization_intent = intent
         st.session_state.refinement_text = ""
+        # Also clear the widget key — otherwise Streamlit's session state for
+        # `refinement_input` wins over the `value=` param and stale text from
+        # the previous goal stays visible after switching to another goal.
+        st.session_state.refinement_input = ""
         load_and_plan.clear()
         st.toast(f"Re-ranked: {get_strategy(intent).label}")
 
@@ -394,6 +398,12 @@ with tab_pipeline:
         st.session_state.selected_goal = BALANCED_INTENT
         st.session_state.prioritization_intent = BALANCED_INTENT
         st.session_state.refinement_text = ""
+        # Mirror _select_goal: clear the widget key too. Not strictly needed
+        # today (the text input is unmounted when active == BALANCED_INTENT),
+        # but this protects against a future refactor that keeps the input
+        # mounted on the balanced view.
+        if "refinement_input" in st.session_state:
+            st.session_state.refinement_input = ""
         load_and_plan.clear()
         st.toast("Reset to balanced")
 
