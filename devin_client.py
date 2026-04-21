@@ -17,7 +17,7 @@ import time
 import requests
 from typing import Optional
 
-from config import DEVIN_API_BASE, DEVIN_API_KEY, DEVIN_ORG_ID
+from config import DEVIN_API_BASE, DEVIN_API_KEY, DEVIN_ORG_ID, SESSION
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,11 @@ def create_session(prompt: str, bypass_approval: bool = True,
     if idempotency_key:
         headers["Idempotency-Key"] = idempotency_key
 
+    # POST goes through bare requests.post (not SESSION): creating a Devin
+    # session is non-idempotent and urllib3's Retry does NOT honour
+    # ``allowed_methods=["GET"]`` on connection-level errors, so POSTing via
+    # SESSION would silently spawn duplicate orphaned sessions on DNS /
+    # connection-refused / connect-timeout failures.
     response = requests.post(
         f"{DEVIN_API_BASE}/sessions",
         headers=headers,
@@ -100,7 +105,7 @@ def get_session(session_id: str) -> Optional[dict]:
     need a one-shot read rather than the full ``poll_until_done`` loop.
     """
     try:
-        response = requests.get(
+        response = SESSION.get(
             f"{DEVIN_API_BASE}/sessions/{session_id}",
             headers=_auth_headers(),
             timeout=15,
@@ -132,7 +137,7 @@ def poll_until_done(session_id: str, timeout: int = 360,
     while time.time() < deadline:
         attempt += 1
         try:
-            response = requests.get(
+            response = SESSION.get(
                 f"{DEVIN_API_BASE}/sessions/{session_id}",
                 headers=headers,
                 timeout=15,
@@ -189,7 +194,7 @@ def fetch_messages(session_id: str, label: str = "devin_client") -> list:
         if cursor:
             params["after"] = cursor
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=20)
+            response = SESSION.get(url, headers=headers, params=params, timeout=20)
         except requests.exceptions.RequestException as e:
             log.warning("fetch_messages: request error — %s", e)
             break

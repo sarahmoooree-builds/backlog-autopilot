@@ -28,6 +28,7 @@ from collections import Counter
 from dotenv import load_dotenv
 
 import store
+from config import SESSION
 from planner import migrate_legacy_score
 from prompts import OPTIMIZER_PROMPT
 
@@ -451,6 +452,9 @@ def run_optimizer_with_devin() -> list:
         "Creating Devin session for %d terminal execution(s)…", len(executions),
     )
     try:
+        # See devin_client.create_session — POST uses bare requests.post to
+        # avoid urllib3 retrying non-idempotent session creation on
+        # connection errors (allowed_methods=["GET"] is not honoured there).
         response = requests.post(
             f"{DEVIN_API_BASE}/sessions",
             headers=headers,
@@ -780,7 +784,7 @@ def _poll_until_done(session_id: str, headers: dict):
     while time.time() < deadline:
         attempt += 1
         try:
-            response = requests.get(
+            response = SESSION.get(
                 f"{DEVIN_API_BASE}/sessions/{session_id}",
                 headers=headers,
                 timeout=15,
@@ -833,7 +837,7 @@ def _fetch_messages(session_id: str, headers: dict) -> list:
         if cursor:
             params["after"] = cursor
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=20)
+            response = SESSION.get(url, headers=headers, params=params, timeout=20)
         except requests.exceptions.RequestException as e:
             logger.warning("_fetch_messages: request error — %s", e)
             break
