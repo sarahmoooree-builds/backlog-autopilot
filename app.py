@@ -263,6 +263,13 @@ STATUS_STYLE = {
     "blocked":         ("Blocked",           "rgba(220,53,69,0.22)",   "#ff8a94"),
 }
 
+# Statuses for which an issue's row renders with a disabled, pinned-True
+# checkbox (see render_issue_row). Used to decide which widget-state keys are
+# safe to write when programmatically clearing selection.
+DISABLED_CHECKBOX_STATUSES = frozenset({
+    "completed", "in_progress", "awaiting_review", "blocked", "scoping",
+})
+
 
 def derive_status(issue_id: int) -> str:
     """
@@ -573,12 +580,18 @@ with tab_pipeline:
 
     with a2:
         if st.button("Clear selection", disabled=not currently_selected):
-            # Only reset widget state for issues that are still selectable.
-            # Dispatched / in-progress issues render via the disabled-checkbox
-            # path with value=True; Streamlit ignores `value=` once a key has
-            # state, so touching their keys here would make them visually
-            # unchecked even though they're locked in.
-            for iid in list(st.session_state.selected_ids & selectable_ids):
+            # Reset widget state for every selected issue that renders through
+            # the *enabled* checkbox path. Rows on the disabled path (see
+            # render_issue_row) are pinned to value=True and Streamlit ignores
+            # value= once a key has state, so we must not write False there or
+            # locked-in rows will visually flip to unchecked. "Selectable" is
+            # not a tight enough filter — scope_failed / scope_review / ready
+            # rows are also enabled checkboxes but aren't in selectable_ids.
+            for iid in list(st.session_state.selected_ids):
+                if store.is_dispatched(iid):
+                    continue
+                if derive_status(iid) in DISABLED_CHECKBOX_STATUSES:
+                    continue
                 st.session_state[f"select_{iid}"] = False
             st.session_state.selected_ids.clear()
             st.rerun()
@@ -686,8 +699,7 @@ with tab_pipeline:
         col_check, col_info = st.columns([0.45, 9.55])
 
         with col_check:
-            if already_sent or status_key in ("completed", "in_progress", "awaiting_review",
-                                               "blocked", "scoping"):
+            if already_sent or status_key in DISABLED_CHECKBOX_STATUSES:
                 st.checkbox(
                     "Selected",
                     key=f"select_{issue_id}",
