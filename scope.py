@@ -16,20 +16,14 @@ It does NOT write code or open PRs.
 Output is saved to store.py (scope_plans section).
 """
 
-import json
 import logging
-import time
+
 import requests
 from datetime import datetime
 
+import devin_client
 import store
-from config import (
-    DEVIN_API_BASE,
-    DEVIN_API_KEY,
-    POLL_INTERVAL,
-    SCOPE_TIMEOUT,
-    TARGET_REPO,
-)
+from config import POLL_INTERVAL, SCOPE_TIMEOUT, TARGET_REPO
 from prompts import SCOPE_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -49,33 +43,21 @@ def scope_issue(planned_issue: dict) -> dict:
     issue_id = planned_issue["id"]
     prompt = _build_scope_prompt(planned_issue)
 
-    headers = {
-        "Authorization": f"Bearer {DEVIN_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
     # --- Step 1: Create the scope session ---
     logger.info("Creating Devin session for issue #%s...", issue_id)
     try:
-        response = requests.post(
-            f"{DEVIN_API_BASE}/sessions",
-            headers=headers,
-            json={"prompt": prompt, "bypass_approval": True},
-            timeout=30,
-        )
+        created = devin_client.create_session(prompt, bypass_approval=True)
     except requests.exceptions.RequestException as e:
         err = _error_plan(issue_id, "", f"Could not reach Devin API: {str(e)}")
         store.set_scope_plan(issue_id, err)
         return err
-
-    if response.status_code not in (200, 201):
-        err = _error_plan(issue_id, "", f"API returned {response.status_code}: {response.text[:200]}")
+    except RuntimeError as e:
+        err = _error_plan(issue_id, "", str(e))
         store.set_scope_plan(issue_id, err)
         return err
 
-    session_data = response.json()
-    session_id = session_data.get("session_id")
-    session_url = session_data.get("url", f"https://app.devin.ai/sessions/{session_id}")
+    session_id = created["session_id"]
+    session_url = created["session_url"]
 
     if not session_id:
         err = _error_plan(issue_id, "", "No session_id returned from Devin API")
@@ -89,7 +71,12 @@ def scope_issue(planned_issue: dict) -> dict:
     store.set_scope_plan(issue_id, pending)
 
     # --- Step 3: Poll until finished ---
-    result = _poll_until_done(session_id, headers)
+    result = devin_client.poll_until_done(
+        session_id,
+        timeout=SCOPE_TIMEOUT,
+        poll_interval=POLL_INTERVAL,
+        label="scope",
+    )
 
     if not result:
         err = _error_plan(
@@ -114,7 +101,7 @@ def scope_issue(planned_issue: dict) -> dict:
         issue_id, final_status, final_detail, has_structured_output,
     )
 
-    messages = _fetch_messages(session_id, headers)
+    messages = devin_client.fetch_messages(session_id, label="scope")
     devin_count = sum(
         1 for m in messages if (m.get("source") or "").lower() == "devin"
     )
@@ -126,7 +113,9 @@ def scope_issue(planned_issue: dict) -> dict:
     # Attempt extraction even when the session is still 'running' +
     # 'waiting_for_user' / 'finished' — Devin often emits the full JSON plan
     # and then waits for further instructions rather than fully exiting.
-    plan_data, plan_source = _extract_scope_json(result, messages)
+    plan_data = devin_client.extract_json_object(
+        result, messages=messages, required_fields=_REQUIRED_PLAN_FIELDS
+    )
 
     if not plan_data:
         suspended_note = (
@@ -156,8 +145,8 @@ def scope_issue(planned_issue: dict) -> dict:
         return err
 
     logger.info(
-        "Parsed scope JSON for issue #%s (source=%r, status=%r, detail=%r)",
-        issue_id, plan_source, final_status, final_detail,
+        "Parsed scope JSON for issue #%s (status=%r, detail=%r)",
+        issue_id, final_status, final_detail,
     )
 
     scope_plan = {
@@ -255,187 +244,8 @@ def _error_plan(issue_id: int, session_url: str, error_msg: str) -> dict:
     }
 
 
-# Devin v3 statuses the scope stage treats as "still working" — anything else
-# is treated as terminal. See:
-# https://docs.devin.ai/api-reference/v3/sessions/get-organizations-session
-_NON_TERMINAL_STATUSES = (
-    "new", "creating", "claimed", "running", "resuming",
-    # legacy aliases retained for safety if older payloads appear
-    "starting", "queued", "initializing", "created",
-)
-# status_detail values (with status="running") that indicate Devin has
-# produced its final work product and is simply idle/awaiting the next step.
-_WORK_PRODUCT_READY_DETAILS = ("waiting_for_user", "finished")
-
-
-def _poll_until_done(session_id: str, headers: dict):
-    """
-    Poll the Devin session every POLL_INTERVAL seconds until a terminal state
-    or timeout. Prints status updates for visibility.
-    Returns the final session dict, or None on timeout.
-    """
-    deadline = time.time() + SCOPE_TIMEOUT
-    attempt = 0
-
-    while time.time() < deadline:
-        attempt += 1
-        try:
-            response = requests.get(
-                f"{DEVIN_API_BASE}/sessions/{session_id}",
-                headers=headers,
-                timeout=15,
-            )
-            if response.status_code == 200:
-                session = response.json()
-                status = (session.get("status") or "unknown").lower()
-                detail = (session.get("status_detail") or "").lower()
-                logger.debug(
-                    "Poll #%d: status=%r detail=%r", attempt, status, detail,
-                )
-                if status not in _NON_TERMINAL_STATUSES:
-                    logger.info(
-                        "Poll #%d: terminal status reached (%r)",
-                        attempt, status,
-                    )
-                    return session
-                if detail in _WORK_PRODUCT_READY_DETAILS:
-                    logger.info(
-                        "Poll #%d: Devin work product ready (status=%r, detail=%r)",
-                        attempt, status, detail,
-                    )
-                    return session
-            else:
-                logger.warning(
-                    "Poll #%d: HTTP %d", attempt, response.status_code,
-                )
-        except requests.exceptions.RequestException as e:
-            logger.warning("Poll #%d: request error — %s", attempt, e)
-
-        time.sleep(POLL_INTERVAL)
-
-    logger.warning("Timed out after %ds (%d polls)", SCOPE_TIMEOUT, attempt)
-    return None
-
-
-def _fetch_messages(session_id: str, headers: dict) -> list:
-    """
-    Fetch all messages for a Devin session from the v3 messages endpoint.
-
-    The v3 session-retrieval endpoint does not include messages inline — they
-    are served via a separate paginated endpoint. Returns a list of message
-    dicts in chronological order (may be empty on error).
-    """
-    url = f"{DEVIN_API_BASE}/sessions/{session_id}/messages"
-    messages: list = []
-    cursor = None
-    pages = 0
-    max_pages = 20  # hard stop to avoid runaway pagination
-
-    while pages < max_pages:
-        params = {"first": 200}
-        if cursor:
-            params["after"] = cursor
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=20)
-        except requests.exceptions.RequestException as e:
-            logger.warning("_fetch_messages: request error — %s", e)
-            break
-        if response.status_code != 200:
-            logger.warning(
-                "_fetch_messages: HTTP %d — %s",
-                response.status_code, response.text[:200],
-            )
-            break
-        payload = response.json()
-        items = payload.get("items") or []
-        messages.extend(items)
-        if not payload.get("has_next_page"):
-            break
-        cursor = payload.get("end_cursor")
-        if not cursor:
-            break
-        pages += 1
-    return messages
-
-
 _REQUIRED_PLAN_FIELDS = frozenset({
     "confidence_score", "confidence_reasoning", "root_cause_hypothesis",
     "affected_files", "estimated_lines_changed", "task_breakdown",
     "dependencies", "risks",
 })
-
-
-def _extract_scope_json(session_data: dict, messages=None):
-    """
-    Extract the structured scope JSON from the Devin session output.
-
-    Order of precedence:
-      1. session_data["structured_output"] (populated when a
-         structured_output_schema is provided on session create).
-      2. Devin-authored messages (fetched separately from the v3 messages
-         endpoint), scanned most-recent first. Each message uses the
-         ``message`` field in v3; we also fall back to ``content`` for
-         forward/backward compatibility.
-
-    Returns a ``(plan_dict, source)`` tuple where ``source`` is one of
-    ``"structured_output"``, ``"messages"``, or ``None`` (when no plan could
-    be extracted). ``plan_dict`` is ``None`` iff ``source`` is ``None``.
-    """
-    # 1. structured_output
-    structured = session_data.get("structured_output")
-    if structured and isinstance(structured, dict):
-        if _REQUIRED_PLAN_FIELDS.issubset(structured.keys()):
-            return structured, "structured_output"
-
-    # 2. scan messages in reverse (most recent first)
-    candidates = messages
-    if candidates is None:
-        # Backward-compat: some callers may still pass session payloads that
-        # contain inline messages under legacy keys.
-        candidates = (session_data.get("messages")
-                      or session_data.get("items")
-                      or [])
-
-    for message in reversed(candidates):
-        # v3 uses "message"; older payloads used "content". Accept either.
-        content = message.get("message") or message.get("content") or ""
-        source = (message.get("source") or "").lower()
-        # Skip user-authored messages when we can identify them.
-        if source and source != "devin":
-            continue
-        if not content:
-            continue
-
-        parsed = _parse_plan_from_text(content)
-        if parsed is not None:
-            return parsed, "messages"
-
-    return None, None
-
-
-def _parse_plan_from_text(text: str):
-    """Try to extract a valid scope-plan JSON object from a text blob."""
-    if not isinstance(text, str):
-        return None
-    stripped = text.strip()
-
-    # Try the whole blob as JSON.
-    try:
-        parsed = json.loads(stripped)
-        if isinstance(parsed, dict) and _REQUIRED_PLAN_FIELDS.issubset(parsed.keys()):
-            return parsed
-    except (json.JSONDecodeError, AttributeError):
-        pass
-
-    # Try the largest balanced JSON object within the text.
-    start = stripped.find("{")
-    end = stripped.rfind("}") + 1
-    if start >= 0 and end > start:
-        try:
-            parsed = json.loads(stripped[start:end])
-            if isinstance(parsed, dict) and _REQUIRED_PLAN_FIELDS.issubset(parsed.keys()):
-                return parsed
-        except json.JSONDecodeError:
-            pass
-
-    return None
