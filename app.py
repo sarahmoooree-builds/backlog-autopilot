@@ -439,14 +439,17 @@ with tab_pipeline:
                         "high":     "#8ee39f",
                         "moderate": "#c9c9c9",
                     }
-                    badge_html = " · ".join(
+                    # NOTE: not `badge_html` — that name is a module-level
+                    # function used by render_issue_row; shadowing it here
+                    # would crash every issue card with TypeError.
+                    dim_badges_html = " · ".join(
                         f"<span style='color:{emphasis_color.get(level, '#c9c9c9')}; "
                         f"font-weight:600;'>{dim}</span>"
                         f" <span style='color:rgba(255,255,255,0.55); font-size:0.85em;'>"
                         f"({level})</span>"
                         for dim, level in highlights
                     )
-                    st.markdown(badge_html, unsafe_allow_html=True)
+                    st.markdown(dim_badges_html, unsafe_allow_html=True)
 
                 st.text_input(
                     "Optional: refine your goal",
