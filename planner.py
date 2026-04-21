@@ -12,12 +12,18 @@ Output: list[PlannedIssue] sorted by total_score descending (rank 1 = best)
 """
 
 import json
+import logging
 import time
 import requests
 from datetime import datetime
 
 from config import DEVIN_API_BASE, DEVIN_API_KEY, PLANNER_TIMEOUT, POLL_INTERVAL
 from priorities import PlannerStrategy, get_strategy, BALANCED_INTENT
+
+logger = logging.getLogger(__name__)
+# Child logger used by the Devin-powered analysis path so its lines are
+# distinguishable from the rule-based planner path in log output.
+analyse_logger = logger.getChild("analyse")
 
 # ---------------------------------------------------------------------------
 # Configurable PM weights
@@ -338,7 +344,7 @@ def plan_issues_with_devin(ingested: list) -> dict:
         "Content-Type": "application/json",
     }
 
-    print(f"[planner] Creating Devin planner session for {len(ingested)} issues…")
+    logger.info("Creating Devin planner session for %d issues…", len(ingested))
     try:
         response = requests.post(
             f"{DEVIN_API_BASE}/sessions",
@@ -358,7 +364,7 @@ def plan_issues_with_devin(ingested: list) -> dict:
     data = response.json()
     session_id  = data.get("session_id", "")
     session_url = data.get("url", f"https://app.devin.ai/sessions/{session_id}")
-    print(f"[planner] Session created: {session_url}")
+    logger.info("Session created: %s", session_url)
 
     # Poll until done.
     # Same early-exit strategy as ingest: detect JSON in the response rather than
@@ -379,23 +385,23 @@ def plan_issues_with_devin(ingested: list) -> dict:
                 session = r.json()
                 status  = session.get("status", "").lower()
                 detail  = session.get("status_detail", "")
-                print(f"[planner] Poll #{attempt}: status={status!r} detail={detail!r}")
+                logger.debug("Poll #%d: status=%r detail=%r", attempt, status, detail)
 
                 if status not in _NON_TERMINAL:
                     result = session
                     break
 
                 if detail == "waiting_for_user":
-                    print(f"[planner] Poll #{attempt}: Devin finished (waiting_for_user)")
+                    logger.info("Poll #%d: Devin finished (waiting_for_user)", attempt)
                     result = session
                     break
 
                 if attempt >= 3 and _extract_json_array(session):
-                    print(f"[planner] Poll #{attempt}: JSON found in response, exiting early")
+                    logger.info("Poll #%d: JSON found in response, exiting early", attempt)
                     result = session
                     break
         except requests.exceptions.RequestException as e:
-            print(f"[planner] Poll #{attempt}: {e}")
+            logger.warning("Poll #%d: %s", attempt, e)
         time.sleep(POLL_INTERVAL)
 
     if not result:
@@ -439,7 +445,7 @@ def plan_issues_with_devin(ingested: list) -> dict:
     # Sort by total_score descending (Devin may have already ranked, but ensure it)
     planned.sort(key=lambda x: x["planner_score"]["total_score"], reverse=True)
 
-    print(f"[planner] Done — {len(planned)} issues prioritised by Devin.")
+    logger.info("Done — %d issues prioritised by Devin.", len(planned))
     return {
         "status": "complete",
         "session_id": session_id,
@@ -542,7 +548,7 @@ def analyse_issues_with_devin(raw_issues: list) -> dict:
         "Content-Type": "application/json",
     }
 
-    print(f"[analyse] Creating Devin analysis session for {len(raw_issues)} issues…")
+    analyse_logger.info("Creating Devin analysis session for %d issues…", len(raw_issues))
     try:
         response = requests.post(
             f"{DEVIN_API_BASE}/sessions",
@@ -562,7 +568,7 @@ def analyse_issues_with_devin(raw_issues: list) -> dict:
     data = response.json()
     session_id  = data.get("session_id", "")
     session_url = data.get("url", f"https://app.devin.ai/sessions/{session_id}")
-    print(f"[analyse] Session created: {session_url}")
+    analyse_logger.info("Session created: %s", session_url)
 
     # Poll until done — same terminal detection as ingest/planner
     deadline = time.time() + PLANNER_TIMEOUT
@@ -581,21 +587,21 @@ def analyse_issues_with_devin(raw_issues: list) -> dict:
                 session = r.json()
                 status = session.get("status", "").lower()
                 detail = session.get("status_detail", "")
-                print(f"[analyse] Poll #{attempt}: status={status!r} detail={detail!r}")
+                analyse_logger.debug("Poll #%d: status=%r detail=%r", attempt, status, detail)
 
                 if status not in _NON_TERMINAL:
                     result = session
                     break
                 if detail == "waiting_for_user":
-                    print(f"[analyse] Poll #{attempt}: Devin finished (waiting_for_user)")
+                    analyse_logger.info("Poll #%d: Devin finished (waiting_for_user)", attempt)
                     result = session
                     break
                 if attempt >= 3 and _extract_json_array(session):
-                    print(f"[analyse] Poll #{attempt}: JSON found in response, exiting early")
+                    analyse_logger.info("Poll #%d: JSON found in response, exiting early", attempt)
                     result = session
                     break
         except requests.exceptions.RequestException as e:
-            print(f"[analyse] Poll #{attempt}: {e}")
+            analyse_logger.warning("Poll #%d: %s", attempt, e)
         time.sleep(POLL_INTERVAL)
 
     if not result:
@@ -649,7 +655,7 @@ def analyse_issues_with_devin(raw_issues: list) -> dict:
     # Ensure sorted by priority_rank
     planned.sort(key=lambda x: x["planner_score"]["priority_rank"])
 
-    print(f"[analyse] Done — {len(planned)} issues analysed by Devin.")
+    analyse_logger.info("Done — %d issues analysed by Devin.", len(planned))
     return {
         "status":      "complete",
         "session_id":  session_id,
@@ -664,6 +670,9 @@ def _fetch_and_extract_messages(session_id: str, label: str = "planner"):
     Fallback: fetch session messages from the Devin messages endpoint and
     scan them for a JSON array. Returns list or None.
     """
+    # Route each label ("planner" / "analyse") to its own child logger so the
+    # %(name)s field in the log format preserves the distinction.
+    sub_logger = logger.getChild(label) if label != "planner" else logger
     endpoints = [
         f"{DEVIN_API_BASE}/sessions/{session_id}/messages",
         f"{DEVIN_API_BASE}/sessions/{session_id}?include_messages=true",
@@ -675,18 +684,24 @@ def _fetch_and_extract_messages(session_id: str, label: str = "planner"):
                 headers={"Authorization": f"Bearer {DEVIN_API_KEY}"},
                 timeout=15,
             )
-            print(f"[{label}] Messages endpoint {url} → HTTP {r.status_code}")
+            sub_logger.debug("Messages endpoint %s → HTTP %d", url, r.status_code)
             if r.status_code == 200:
                 data = r.json()
-                print(f"[{label}] Messages response type={type(data).__name__} "
-                      f"keys={list(data.keys()) if isinstance(data, dict) else f'list[{len(data)}]'}")
+                shape = (
+                    f"keys={list(data.keys())}" if isinstance(data, dict)
+                    else f"list[{len(data)}]"
+                )
+                sub_logger.debug(
+                    "Messages response type=%s %s",
+                    type(data).__name__, shape,
+                )
                 if isinstance(data, list):
                     result = _extract_json_array({"messages": data})
                 else:
                     result = _extract_json_array(data)
                 if result:
-                    print(f"[{label}] Extracted JSON from fallback endpoint: {url}")
+                    sub_logger.info("Extracted JSON from fallback endpoint: %s", url)
                     return result
         except requests.exceptions.RequestException as e:
-            print(f"[{label}] Messages endpoint {url} → error: {e}")
+            sub_logger.warning("Messages endpoint %s → error: %s", url, e)
     return None

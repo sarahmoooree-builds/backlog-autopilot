@@ -12,12 +12,16 @@ instead of guessing.
 Requires a complete ScopePlan in the store before dispatching.
 """
 
+import logging
+
 import requests
 from datetime import datetime
 
 import store
 from config import DEVIN_API_BASE, DEVIN_API_KEY, TARGET_REPO
 from prompts import EXECUTION_PROMPT
+
+logger = logging.getLogger(__name__)
 
 
 def execute_issues(planned_issues: list) -> list:
@@ -49,7 +53,9 @@ def execute_issues(planned_issues: list) -> list:
         # Require a complete ScopePlan before dispatching
         scope_plan = store.get_scope_plan(issue_id)
         if not scope_plan or scope_plan.get("scope_status") != "complete":
-            print(f"[executor] Skipping issue #{issue_id} — no complete Scope plan found.")
+            logger.warning(
+                "Skipping issue #%s — no complete Scope plan found.", issue_id,
+            )
             results.append({
                 "id": issue_id,
                 "title": issue["title"],

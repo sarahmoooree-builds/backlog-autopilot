@@ -8,12 +8,15 @@ Output: list[IngestedIssue]
 """
 
 import json
+import logging
 import time
 import requests
 from datetime import datetime
 from typing import Optional
 
 from config import DEVIN_API_BASE, DEVIN_API_KEY, INGEST_TIMEOUT, POLL_INTERVAL
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Classification keyword lists
@@ -220,7 +223,7 @@ def ingest_issues_with_devin(raw_issues: list) -> dict:
         "Content-Type": "application/json",
     }
 
-    print(f"[ingest] Creating Devin ingest session for {len(raw_issues)} issues…")
+    logger.info("Creating Devin ingest session for %d issues…", len(raw_issues))
     try:
         response = requests.post(
             f"{DEVIN_API_BASE}/sessions",
@@ -240,7 +243,7 @@ def ingest_issues_with_devin(raw_issues: list) -> dict:
     data = response.json()
     session_id  = data.get("session_id", "")
     session_url = data.get("url", f"https://app.devin.ai/sessions/{session_id}")
-    print(f"[ingest] Session created: {session_url}")
+    logger.info("Session created: %s", session_url)
 
     # Poll until done.
     # Devin text-output sessions (no repo) often complete their task and then
@@ -264,7 +267,7 @@ def ingest_issues_with_devin(raw_issues: list) -> dict:
                 session = r.json()
                 status  = session.get("status", "").lower()
                 detail  = session.get("status_detail", "")
-                print(f"[ingest] Poll #{attempt}: status={status!r} detail={detail!r}")
+                logger.debug("Poll #%d: status=%r detail=%r", attempt, status, detail)
 
                 # Exit on any status that isn't a known in-progress state
                 if status not in _NON_TERMINAL:
@@ -274,17 +277,17 @@ def ingest_issues_with_devin(raw_issues: list) -> dict:
                 # Devin stays status="running" after finishing; done state is
                 # signalled by status_detail="waiting_for_user" (Devin went to sleep).
                 if detail == "waiting_for_user":
-                    print(f"[ingest] Poll #{attempt}: Devin finished (waiting_for_user)")
+                    logger.info("Poll #%d: Devin finished (waiting_for_user)", attempt)
                     result = session
                     break
 
                 # Also exit early if extractable JSON appears in the response body.
                 if attempt >= 3 and _extract_json_array(session):
-                    print(f"[ingest] Poll #{attempt}: JSON found in response, exiting early")
+                    logger.info("Poll #%d: JSON found in response, exiting early", attempt)
                     result = session
                     break
         except requests.exceptions.RequestException as e:
-            print(f"[ingest] Poll #{attempt}: {e}")
+            logger.warning("Poll #%d: %s", attempt, e)
         time.sleep(POLL_INTERVAL)
 
     if not result:
@@ -311,7 +314,7 @@ def ingest_issues_with_devin(raw_issues: list) -> dict:
             "ingested_at": now,
         })
 
-    print(f"[ingest] Done — {len(ingested)} issues normalised by Devin.")
+    logger.info("Done — %d issues normalised by Devin.", len(ingested))
     return {
         "status": "complete",
         "session_id": session_id,
@@ -403,18 +406,24 @@ def _fetch_and_extract_messages(session_id: str):
                 headers={"Authorization": f"Bearer {DEVIN_API_KEY}"},
                 timeout=15,
             )
-            print(f"[ingest] Messages endpoint {url} → HTTP {r.status_code}")
+            logger.debug("Messages endpoint %s → HTTP %d", url, r.status_code)
             if r.status_code == 200:
                 data = r.json()
-                print(f"[ingest] Messages response type={type(data).__name__} "
-                      f"keys={list(data.keys()) if isinstance(data, dict) else f'list[{len(data)}]'}")
+                shape = (
+                    f"keys={list(data.keys())}" if isinstance(data, dict)
+                    else f"list[{len(data)}]"
+                )
+                logger.debug(
+                    "Messages response type=%s %s",
+                    type(data).__name__, shape,
+                )
                 if isinstance(data, list):
                     result = _extract_json_array({"messages": data})
                 else:
                     result = _extract_json_array(data)
                 if result:
-                    print(f"[ingest] Extracted JSON from fallback endpoint: {url}")
+                    logger.info("Extracted JSON from fallback endpoint: %s", url)
                     return result
         except requests.exceptions.RequestException as e:
-            print(f"[ingest] Messages endpoint {url} → error: {e}")
+            logger.warning("Messages endpoint %s → error: %s", url, e)
     return None

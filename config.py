@@ -6,11 +6,44 @@ from a single source of truth. PM-tunable scoring parameters (e.g. weights,
 thresholds) live with the domain logic in `planner.py`, not here.
 """
 
+import logging
 import os
+import sys
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_FORMAT = "%(asctime)s [%(name)s] %(levelname)s %(message)s"
+
+
+def configure_logging() -> None:
+    """Configure the root logger with a stdout StreamHandler.
+
+    Idempotent: safe to call multiple times (e.g. from multiple entrypoints
+    or from within Streamlit's rerun loop). If the root logger already has
+    handlers we only refresh the level so the LOG_LEVEL env var still takes
+    effect.
+    """
+    level = getattr(logging, LOG_LEVEL, logging.INFO)
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    if not root.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter(LOG_FORMAT))
+        root.addHandler(handler)
+
+
+# Configure logging eagerly on import so any module that does
+# ``from config import ...`` has a working root logger without extra setup.
+configure_logging()
 
 # GitHub
 TARGET_REPO = os.getenv("TARGET_REPO", "sarahmoooree-builds/finserv-platform")

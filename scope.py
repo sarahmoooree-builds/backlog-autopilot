@@ -17,6 +17,7 @@ Output is saved to store.py (scope_plans section).
 """
 
 import json
+import logging
 import time
 import requests
 from datetime import datetime
@@ -30,6 +31,8 @@ from config import (
     TARGET_REPO,
 )
 from prompts import SCOPE_PROMPT
+
+logger = logging.getLogger(__name__)
 
 
 def scope_issue(planned_issue: dict) -> dict:
@@ -52,7 +55,7 @@ def scope_issue(planned_issue: dict) -> dict:
     }
 
     # --- Step 1: Create the scope session ---
-    print(f"[scope] Creating Devin session for issue #{issue_id}...")
+    logger.info("Creating Devin session for issue #%s...", issue_id)
     try:
         response = requests.post(
             f"{DEVIN_API_BASE}/sessions",
@@ -79,7 +82,7 @@ def scope_issue(planned_issue: dict) -> dict:
         store.set_scope_plan(issue_id, err)
         return err
 
-    print(f"[scope] Session created: {session_url}")
+    logger.info("Session created: %s", session_url)
 
     # --- Step 2: Save pending state immediately so UI shows progress ---
     pending = _pending_plan(issue_id, session_id, session_url)
@@ -105,16 +108,19 @@ def scope_issue(planned_issue: dict) -> dict:
     final_status = (result.get("status") or "").lower()
     final_detail = (result.get("status_detail") or "").lower()
     has_structured_output = bool(result.get("structured_output"))
-    print(
-        f"[scope] Session terminal state for issue #{issue_id}: "
-        f"status={final_status!r} detail={final_detail!r} "
-        f"structured_output_present={has_structured_output}"
+    logger.info(
+        "Session terminal state for issue #%s: status=%r detail=%r "
+        "structured_output_present=%s",
+        issue_id, final_status, final_detail, has_structured_output,
     )
 
     messages = _fetch_messages(session_id, headers)
-    print(
-        f"[scope] Fetched {len(messages)} message(s) for issue #{issue_id} "
-        f"(devin-authored: {sum(1 for m in messages if (m.get('source') or '').lower() == 'devin')})"
+    devin_count = sum(
+        1 for m in messages if (m.get("source") or "").lower() == "devin"
+    )
+    logger.info(
+        "Fetched %d message(s) for issue #%s (devin-authored: %d)",
+        len(messages), issue_id, devin_count,
     )
 
     # Attempt extraction even when the session is still 'running' +
@@ -135,9 +141,10 @@ def scope_issue(planned_issue: dict) -> dict:
             " (session awaiting further instructions)"
             if final_detail == "waiting_for_user" else ""
         )
-        print(
-            f"[scope] Could not parse scope JSON for issue #{issue_id} "
-            f"— recording error. status={final_status!r} detail={final_detail!r}"
+        logger.warning(
+            "Could not parse scope JSON for issue #%s — recording error. "
+            "status=%r detail=%r",
+            issue_id, final_status, final_detail,
         )
         err = _error_plan(
             issue_id, session_url,
@@ -148,9 +155,9 @@ def scope_issue(planned_issue: dict) -> dict:
         store.set_scope_plan(issue_id, err)
         return err
 
-    print(
-        f"[scope] Parsed scope JSON for issue #{issue_id} "
-        f"(source={plan_source!r}, status={final_status!r}, detail={final_detail!r})"
+    logger.info(
+        "Parsed scope JSON for issue #%s (source=%r, status=%r, detail=%r)",
+        issue_id, plan_source, final_status, final_detail,
     )
 
     scope_plan = {
@@ -163,8 +170,10 @@ def scope_issue(planned_issue: dict) -> dict:
         "scoped_at": datetime.now().isoformat(),
     }
     store.set_scope_plan(issue_id, scope_plan)
-    print(f"[scope] Issue #{issue_id} scoped. "
-          f"Confidence: {plan_data.get('confidence_score')}/100")
+    logger.info(
+        "Issue #%s scoped. Confidence: %s/100",
+        issue_id, plan_data.get("confidence_score"),
+    )
     return scope_plan
 
 
@@ -280,24 +289,31 @@ def _poll_until_done(session_id: str, headers: dict):
                 session = response.json()
                 status = (session.get("status") or "unknown").lower()
                 detail = (session.get("status_detail") or "").lower()
-                print(f"[scope] Poll #{attempt}: status={status!r} detail={detail!r}")
+                logger.debug(
+                    "Poll #%d: status=%r detail=%r", attempt, status, detail,
+                )
                 if status not in _NON_TERMINAL_STATUSES:
-                    print(f"[scope] Poll #{attempt}: terminal status reached ({status!r})")
+                    logger.info(
+                        "Poll #%d: terminal status reached (%r)",
+                        attempt, status,
+                    )
                     return session
                 if detail in _WORK_PRODUCT_READY_DETAILS:
-                    print(
-                        f"[scope] Poll #{attempt}: Devin work product ready "
-                        f"(status={status!r}, detail={detail!r})"
+                    logger.info(
+                        "Poll #%d: Devin work product ready (status=%r, detail=%r)",
+                        attempt, status, detail,
                     )
                     return session
             else:
-                print(f"[scope] Poll #{attempt}: HTTP {response.status_code}")
+                logger.warning(
+                    "Poll #%d: HTTP %d", attempt, response.status_code,
+                )
         except requests.exceptions.RequestException as e:
-            print(f"[scope] Poll #{attempt}: request error — {e}")
+            logger.warning("Poll #%d: request error — %s", attempt, e)
 
         time.sleep(POLL_INTERVAL)
 
-    print(f"[scope] Timed out after {SCOPE_TIMEOUT}s ({attempt} polls)")
+    logger.warning("Timed out after %ds (%d polls)", SCOPE_TIMEOUT, attempt)
     return None
 
 
@@ -322,12 +338,12 @@ def _fetch_messages(session_id: str, headers: dict) -> list:
         try:
             response = requests.get(url, headers=headers, params=params, timeout=20)
         except requests.exceptions.RequestException as e:
-            print(f"[scope] _fetch_messages: request error — {e}")
+            logger.warning("_fetch_messages: request error — %s", e)
             break
         if response.status_code != 200:
-            print(
-                f"[scope] _fetch_messages: HTTP {response.status_code} "
-                f"— {response.text[:200]}"
+            logger.warning(
+                "_fetch_messages: HTTP %d — %s",
+                response.status_code, response.text[:200],
             )
             break
         payload = response.json()
