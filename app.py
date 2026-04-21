@@ -29,7 +29,13 @@ from github_client import (
     fetch_merged_prs,
 )
 from ingest import ingest_issues
-from planner import plan_issues, analyse_issues_with_devin, BUSINESS_LABELS
+from planner import (
+    plan_issues,
+    analyse_issues_with_devin,
+    migrate_legacy_score,
+    reorder_by_tier,
+    BUSINESS_LABELS,
+)
 from priorities import (
     BALANCED_INTENT,
     describe_strategy,
@@ -146,7 +152,16 @@ def load_and_plan(intent: str, ingest_mode: str, planner_mode: str):
     if planner_mode == "devin":
         records = store.all_records("planned")
         if records:
-            return sorted(records, key=lambda x: x["planner_score"]["total_score"], reverse=True)
+            # Lazily promote old 4-dim planner_score dicts to the new shape
+            # so downstream readers can rely on `tier`, `ease`, etc.
+            for rec in records:
+                rec["planner_score"] = migrate_legacy_score(
+                    rec.get("planner_score", {}) or {}
+                )
+            # Match the rule-based path: tier ascending (T1 first), then
+            # score_within_tier descending, re-assigning priority_rank so the
+            # UI "Priority: #N" badge matches the visible order.
+            return reorder_by_tier(records)
 
     if ingest_mode == "devin":
         ingested = store.all_records("ingested")
