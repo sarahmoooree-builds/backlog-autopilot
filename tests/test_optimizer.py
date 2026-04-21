@@ -42,7 +42,22 @@ def _planned(**overrides) -> dict:
         "id": 1,
         "issue_type": "bug",
         "risk": "low",
-        "planner_score": {"effort": 5},
+        # New 6-dim + tier shape. ease=5 is the neutral default (~ old effort=5).
+        "planner_score": {
+            "severity": 5,
+            "reach": 5,
+            "business_value": 4,
+            "ease": 5,
+            "confidence": 5,
+            "urgency": 5,
+            "tier": 3,
+            "tier_reason": "Test fixture",
+            "score_within_tier": 5.0,
+            "total_score": 5.0,
+            "recommended": False,
+            "recommendation_reason": "",
+            "priority_rank": 0,
+        },
     }
     base.update(overrides)
     return base
@@ -156,10 +171,20 @@ class TestDetectPatterns:
         assert "investigation-leak" in tags
 
     def test_low_effort_win(self):
+        # ease=8 → easy issue that completed fast
         tags = _detect_patterns(
             _exec(status="Completed", pull_requests=["p1"]),
             _plan(),
-            _planned(planner_score={"effort": 2}),
+            _planned(planner_score={"ease": 8}),
+        )
+        assert "low-effort-win" in tags
+
+    def test_low_effort_win_migrated_from_legacy(self):
+        # Old records only have `effort`; migrate_legacy_score should derive ease.
+        tags = _detect_patterns(
+            _exec(status="Completed", pull_requests=["p1"]),
+            _plan(),
+            _planned(planner_score={"effort": 2}),  # 10-2 = ease=8
         )
         assert "low-effort-win" in tags
 
@@ -167,7 +192,7 @@ class TestDetectPatterns:
         tags = _detect_patterns(
             _exec(status="Awaiting Review"),
             _plan(confidence_score=50),
-            _planned(issue_type="bug", planner_score={"effort": 5}),
+            _planned(issue_type="bug", planner_score={"ease": 5}),
         )
         assert tags == []
 

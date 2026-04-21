@@ -29,7 +29,12 @@ from github_client import (
     fetch_merged_prs,
 )
 from ingest import ingest_issues
-from planner import plan_issues, analyse_issues_with_devin, BUSINESS_LABELS
+from planner import (
+    plan_issues,
+    analyse_issues_with_devin,
+    migrate_legacy_score,
+    BUSINESS_LABELS,
+)
 from priorities import (
     BALANCED_INTENT,
     describe_strategy,
@@ -146,6 +151,12 @@ def load_and_plan(intent: str, ingest_mode: str, planner_mode: str):
     if planner_mode == "devin":
         records = store.all_records("planned")
         if records:
+            # Lazily promote old 4-dim planner_score dicts to the new shape
+            # so downstream readers can rely on `tier`, `ease`, etc.
+            for rec in records:
+                rec["planner_score"] = migrate_legacy_score(
+                    rec.get("planner_score", {}) or {}
+                )
             return sorted(records, key=lambda x: x["planner_score"]["total_score"], reverse=True)
 
     if ingest_mode == "devin":

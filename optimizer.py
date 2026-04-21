@@ -27,6 +27,7 @@ from collections import Counter
 from dotenv import load_dotenv
 
 import store
+from planner import migrate_legacy_score
 from prompts import OPTIMIZER_PROMPT
 
 TERMINAL_STATUSES = {"Completed", "Blocked", "Awaiting Review"}
@@ -239,7 +240,7 @@ def _detect_patterns(
       confidence-mismatch   — scope confidence ≥ 75 but Blocked
       fast-completion       — Completed with exactly 1 PR
       investigation-leak    — investigation type reached Executor
-      low-effort-win        — planner effort ≤ 3 and Completed
+      low-effort-win        — planner ease ≥ 7 (easy issue) and Completed
     """
     tags = []
     status = execution.get("status", "")
@@ -247,7 +248,10 @@ def _detect_patterns(
     confidence = scope_plan.get("confidence_score", 0) if scope_plan else 0
     files_delta = _estimate_files_delta(execution, scope_plan)
     issue_type = planned_issue.get("issue_type", "") if planned_issue else ""
-    planner_effort = (planned_issue or {}).get("planner_score", {}).get("effort", 5)
+    planner_score = migrate_legacy_score(
+        (planned_issue or {}).get("planner_score", {}) or {}
+    )
+    planner_ease = planner_score.get("ease", 5)
 
     # Did a high-risk issue actually complete?
     planned_risk = (planned_issue or {}).get("risk", "")
@@ -266,7 +270,8 @@ def _detect_patterns(
     if issue_type == "investigation":
         tags.append("investigation-leak")
 
-    if planner_effort <= 3 and status == "Completed":
+    # ease ≥ 7 is the new "low-effort" threshold (ease = 10 - old-effort).
+    if planner_ease >= 7 and status == "Completed":
         tags.append("low-effort-win")
 
     return tags
