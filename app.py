@@ -381,14 +381,14 @@ with tab_pipeline:
                 )
         with badges_col:
             highlights = weight_highlights(active_intent, top_n=2)
-            badge_html = " ".join(
+            priority_badge_html = " ".join(
                 f"<span style='background:rgba(27,122,142,0.18); color:#7fd0df; "
                 f"padding:4px 10px; border-radius:12px; font-size:0.8em; "
                 f"margin-right:6px;'>{label} {pct}%</span>"
                 for label, pct in highlights
             )
             st.markdown(
-                f"<div style='text-align:right'>{badge_html}</div>",
+                f"<div style='text-align:right'>{priority_badge_html}</div>",
                 unsafe_allow_html=True,
             )
 
