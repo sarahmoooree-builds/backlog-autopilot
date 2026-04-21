@@ -62,14 +62,28 @@ class IngestedIssue(TypedDict):
 # ---------------------------------------------------------------------------
 
 class PlannerScore(TypedDict):
-    user_impact: int        # 0–10
-    business_impact: int    # 0–10
-    effort: int             # 0–10  (10 = hardest; inverted in total_score)
-    confidence: int         # 0–10  (automation likelihood)
-    total_score: float      # weighted sum
-    recommended: bool       # True if total_score >= 6.0 and risk/type allow it
+    # Enriched scoring dimensions. Every dimension is "higher = better" —
+    # NO hidden inversions in the weighted sum.
+    severity: int              # 0–10, how bad it is when it happens
+    reach: int                 # 0–10, how many users/customers are affected
+    business_value: int        # 0–10, revenue / compliance / SLA importance
+    ease: int                  # 0–10, higher = easier to implement
+    confidence: int            # 0–10, automation likelihood
+    urgency: int               # 0–10, time pressure (age, SLA, comment velocity)
+
+    # Policy-driven tier assignment. Tier is the primary ranking axis;
+    # score_within_tier orders issues inside a tier.
+    tier: int                  # 1–4 (1 = Critical, 4 = Deferred)
+    tier_reason: str           # human-readable explanation of the tier choice
+    score_within_tier: float   # weighted sum used for ordering within a tier
+
+    # Kept for backward compatibility with older stored records and with the
+    # rule-based recommend() threshold. Derived from tier + score_within_tier
+    # for new records.
+    total_score: float
+    recommended: bool
     recommendation_reason: str
-    priority_rank: int      # 1 = highest priority among the batch
+    priority_rank: int         # 1 = highest priority among the batch
 
 
 class PlannedIssue(TypedDict):
