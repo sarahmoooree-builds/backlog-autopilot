@@ -1,14 +1,17 @@
 """
 prompts.py — Prompt templates for Devin-powered pipeline stages
 
-Stage 3 (Scope):    SCOPE_PROMPT — produces a technical implementation plan
-Stage 4 (Executor): EXECUTION_PROMPT — implements the plan and opens a PR
+Stage 3 (Scope):     SCOPE_PROMPT — produces a technical implementation plan
+Stage 4 (Executor):  EXECUTION_PROMPT — implements the plan and opens a PR
+Stage 5 (Optimizer): OPTIMIZER_PROMPT — retrospective batch analysis of
+                     completed execution sessions (Devin-powered path)
 
-Stages 1 and 2 (Ingest, Planner) are rule-based — no Devin prompts needed.
-Stage 5 (Optimizer) reads stored data — no Devin prompts needed.
+Stages 1 and 2 (Ingest, Planner) have both rule-based and Devin-powered paths;
+Stage 5 (Optimizer) also has both paths. The rule-based optimizer uses crude
+heuristics and does not need a prompt — it reads stored data only.
 
 Usage:
-    from prompts import SCOPE_PROMPT, EXECUTION_PROMPT
+    from prompts import SCOPE_PROMPT, EXECUTION_PROMPT, OPTIMIZER_PROMPT
     prompt = SCOPE_PROMPT.format(issue_id=..., title=..., ...)
 """
 
@@ -502,6 +505,150 @@ After the fixer completes, output a structured JSON summary:
   "pr_url": "<url or null>",
   "concerns": ["<any follow-up items>"]
 }}
+"""
+
+
+# ---------------------------------------------------------------------------
+# Stage 5: Optimizer Prompt
+#
+# Instructs Devin to perform a retrospective batch analysis across all
+# completed execution sessions. Unlike the rule-based optimizer, this path
+# fetches real PR diff stats and reads Devin session logs to identify root
+# causes, producing a richer OptimizationRecord per issue.
+#
+# Format params:
+#   executions_json, scope_plans_json, planned_issues_json
+# ---------------------------------------------------------------------------
+
+OPTIMIZER_PROMPT = """\
+You are a senior engineering retrospective analyst reviewing a batch of completed \
+autonomous-resolution sessions for an enterprise financial services platform.
+
+Work on the GitHub repository https://github.com/sarahmoooree-builds/finserv-platform.
+
+## Subagent Instructions
+
+Use the `issue-optimizer` subagent (defined in `.devin/agents/issue-optimizer/AGENT.md`) to \
+drive the retrospective analysis. The subagent knows the pipeline's pattern vocabulary and \
+the schema it must return. Feed it the JSON payload below, and augment its output where \
+noted in the "Required Output" section.
+
+## Pipeline Data
+
+You are given three parallel JSON collections keyed by issue id. Each element in \
+`executions` is a terminal `ExecutionSession` — i.e. `status` is one of `Completed`, \
+`Blocked`, or `Awaiting Review`. Every execution has a matching scope plan and planned \
+issue (when available). Only analyse issues that appear in `executions`.
+
+### Execution sessions (terminal state only)
+
+```json
+{executions_json}
+```
+
+### Corresponding scope plans
+
+```json
+{scope_plans_json}
+```
+
+### Corresponding planned issues (with planner scores)
+
+```json
+{planned_issues_json}
+```
+
+## Your Task
+
+For each execution in the batch:
+
+1. **Fetch real PR diff stats.** For every pull request listed in `pull_requests`, read the \
+actual diff from the `sarahmoooree-builds/finserv-platform` repo. Record the total files \
+changed and total lines added + removed. If a session has no PRs (e.g. Blocked), leave the \
+real-diff fields null.
+
+2. **Compare actual vs. estimated effort.** Compute `lines_delta` as `actual_lines_changed \
+- estimated_lines_changed` and `files_delta` as `len(actual_files_changed) - \
+len(scope_plan.affected_files)`. Fall back to the proxy rules in `optimizer.py` \
+`_estimate_lines_delta` / `_estimate_files_delta` only if real diff data is unavailable.
+
+3. **Classify estimation accuracy** using the real deltas (not proxies):
+   - `"under"` — the session used meaningfully more code than planned \
+(lines_delta > 20 **or** files_delta > 2), **or** status is `Blocked`.
+   - `"over"` — the session used meaningfully less (lines_delta < -20 **or** files_delta < -2).
+   - `"accurate"` — otherwise.
+
+4. **For Blocked sessions**, read the Devin session logs / final messages (the \
+`session_url` field links to the session) and summarise the root cause in \
+`failure_root_cause`: environment problem, missing information, plan contradiction, test \
+failure, scope mismatch, or other. Keep it under 240 characters. For non-Blocked sessions \
+this field must be null.
+
+5. **Detect pattern tags** from this fixed vocabulary (use only these exact strings):
+   - `fast-completion` — Completed with exactly 1 PR and `lines_delta` within ±20.
+   - `confidence-mismatch` — `scope_plan.confidence_score >= 75` but session is Blocked.
+   - `underestimated-scope` — `files_delta > 2` or `lines_delta > 50`.
+   - `low-effort-win` — planner effort score ≤ 3 and session is Completed.
+   - `investigation-leak` — `planned_issue.issue_type == "investigation"` that reached the \
+executor.
+   - `auth-false-positive` — `planned_issue.risk == "high"` that nevertheless Completed.
+
+6. **Across the batch**, look for systemic patterns that should feed back into earlier \
+pipeline stages (e.g. several `underestimated-scope` tags → raise complexity thresholds in \
+`ingest.py`; several `investigation-leak` tags → tighten the `recommend()` threshold in \
+`planner.py`). Emit one actionable recommendation per root cause, each referencing a \
+concrete constant, threshold, or function in the pipeline code (for example `DEFAULT_WEIGHTS` \
+in `planner.py`, `SCOPE_TIMEOUT` in `scope.py`, complexity thresholds in `ingest.py`).
+
+## Required Output
+
+Respond with ONLY a JSON **array**, one object per execution in the input (same order is \
+fine). Do NOT wrap the array in an outer object, do NOT emit a single combined record, do \
+NOT add markdown fences or commentary.
+
+```json
+[
+  {{
+    "issue_id": <int>,
+    "actual_status": "<Completed|Blocked|Awaiting Review>",
+    "actual_pr_count": <int>,
+    "actual_lines_changed": <int or null>,
+    "actual_files_changed": ["<real file path>", ...],
+    "lines_delta": <int>,
+    "files_delta": <int>,
+    "estimation_accuracy": "<over|under|accurate>",
+    "scope_confidence": <int 0-100>,
+    "planned_score": {{ "user_impact": <int>, "business_impact": <int>, "effort": <int>, \
+"confidence": <int>, "total_score": <float>, "recommended": <bool>, \
+"recommendation_reason": "<string>", "priority_rank": <int> }},
+    "pattern_tags": ["<tag from fixed vocabulary>", ...],
+    "failure_root_cause": "<=240 chars, or null for non-Blocked",
+    "optimizer_notes": "<1-3 sentences of retrospective commentary — cite concrete files, \
+functions, or constants when relevant>",
+    "recommendations": [
+      "<actionable recommendation referencing a specific pipeline constant or threshold>",
+      ...
+    ]
+  }}
+]
+```
+
+### Critical rules
+
+- Output raw JSON only — no markdown fences, no commentary, no extra fields.
+- Return a JSON **array** — one object per issue. Every issue id that appears in `executions` \
+must appear in the output **exactly once**.
+- Only use pattern tags from the fixed vocabulary above. If none apply, use `[]`.
+- `actual_files_changed` and `actual_lines_changed` must reflect the real PR diff, not the \
+Scope estimate. Leave them `null` (or `[]` for the file list) if no PR is accessible.
+- `failure_root_cause` is `null` for any issue whose session status is not `Blocked`.
+- `estimation_accuracy` values must be lower-case `"over"`, `"under"`, or `"accurate"`.
+- `recommendations` must reference concrete Python constants or thresholds (for example \
+`DEFAULT_WEIGHTS` in `planner.py`, `recommend()` threshold in `planner.py`, complexity \
+thresholds in `ingest.py`, `SCOPE_TIMEOUT` in `scope.py`). Generic advice without a concrete \
+lever is not acceptable.
+- Do not invent PRs, diffs, files, or session ids. If you cannot retrieve real data for a \
+field, set it to `null` (or `[]` for the file list).
 """
 
 

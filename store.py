@@ -1,33 +1,30 @@
 """
 store.py — Unified persistence layer for all 5 pipeline stages
 
-Replaces state.py (sessions.json) and triage_store.py (triage_store.json).
+Backend: SQLite (``pipeline_store.db``) with ACID guarantees. Previously a
+single ``pipeline_store.json`` file — the JSON format is still read once at
+startup and migrated into SQLite, then renamed to ``pipeline_store.json.migrated``.
 
-Single file: pipeline_store.json
+Schema: one table per section — ``ingested``, ``planned``, ``approvals``,
+``architect_plans``, ``reviews``, ``executions``, ``optimizations``, plus
+``pipeline_meta``. Each row has a text primary key (``issue_id`` or ``stage``
+for ``pipeline_meta``) and a ``data TEXT NOT NULL`` JSON blob. This keeps the
+dict-based public API unchanged while adding per-operation concurrency safety.
 
-Format:
-{
-  "ingested":        { "<issue_id>": IngestedIssue, ... },
-  "planned":         { "<issue_id>": PlannedIssue, ... },
-  "approvals":       { "<issue_id>": ApprovalRecord, ... },
-  "architect_plans": { "<issue_id>": ScopePlan, ... },   # section name kept for backwards-compat
-  "reviews":         { "<issue_id>": ReviewRecord, ... },
-  "executions":      { "<issue_id>": ExecutionSession, ... },
-  "optimizations":   { "<issue_id>": OptimizationRecord, ... }
-}
-
-Scope (Stage 3) was previously called "Architect". The JSON section name
-(`architect_plans`) is preserved so existing pipeline_store.json files keep
-working; per-record field names (`architect_status` → `scope_status`,
-`architected_at` → `scoped_at`) are migrated on load.
+Scope (Stage 3) was previously called "Architect". The table name
+(``architect_plans``) is preserved so existing data keeps working; per-record
+field names (``architect_status`` → ``scope_status``, ``architected_at`` →
+``scoped_at``) are migrated on load.
 """
 
 import json
 import os
+import sqlite3
 from datetime import datetime
 from typing import Optional
 
 STORE_FILE = os.path.join(os.path.dirname(__file__), "pipeline_store.json")
+STORE_DB = os.path.join(os.path.dirname(__file__), "pipeline_store.db")
 LEGACY_SESSIONS_FILE = os.path.join(os.path.dirname(__file__), "sessions.json")
 LEGACY_TRIAGE_FILE = os.path.join(os.path.dirname(__file__), "triage_store.json")
 
@@ -36,28 +33,82 @@ SECTIONS = [
     "reviews", "executions", "optimizations"
 ]
 
+# Whitelist of valid table names. Section names are interpolated directly
+# into SQL, so every public function validates against this set first.
+_VALID_TABLES = set(SECTIONS) | {"pipeline_meta"}
+
 
 # ---------------------------------------------------------------------------
-# Core load / save
+# Connection + schema
 # ---------------------------------------------------------------------------
 
-def _load() -> dict:
+def _conn() -> sqlite3.Connection:
+    # check_same_thread=False so Streamlit's thread-per-session model can reuse
+    # the module from multiple threads. Each call opens its own connection and
+    # SQLite serialises concurrent writes at the file level.
+    return sqlite3.connect(STORE_DB, check_same_thread=False)
+
+
+def _init_db() -> None:
+    with _conn() as conn:
+        for section in SECTIONS:
+            conn.execute(
+                f"CREATE TABLE IF NOT EXISTS {section} ("
+                "issue_id TEXT PRIMARY KEY, data TEXT NOT NULL)"
+            )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS pipeline_meta ("
+            "stage TEXT PRIMARY KEY, data TEXT NOT NULL)"
+        )
+
+
+def _validate_section(section: str) -> None:
+    if section not in _VALID_TABLES:
+        raise ValueError(f"Unknown store section: {section!r}")
+
+
+# Ensure schema exists before any caller runs a query.
+_init_db()
+
+
+# ---------------------------------------------------------------------------
+# One-time migration from pipeline_store.json → SQLite
+# ---------------------------------------------------------------------------
+
+def _migrate_from_json() -> None:
+    """Load pipeline_store.json (if present) into SQLite, then back it up.
+
+    Idempotent: after a successful migration the JSON file is renamed to
+    ``pipeline_store.json.migrated`` so subsequent calls are no-ops.
+    """
     if not os.path.exists(STORE_FILE):
-        result = {s: {} for s in SECTIONS}
-        result["pipeline_meta"] = {}
-        return result
-    with open(STORE_FILE, "r") as f:
-        data = json.load(f)
-    # Ensure all sections exist (forward-compatible)
-    for s in SECTIONS:
-        data.setdefault(s, {})
-    data.setdefault("pipeline_meta", {})
-    return data
+        return
+    try:
+        with open(STORE_FILE, "r") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return
 
+    with _conn() as conn:
+        for section in SECTIONS:
+            records = data.get(section, {}) or {}
+            for issue_id, record in records.items():
+                conn.execute(
+                    f"INSERT OR REPLACE INTO {section} (issue_id, data) VALUES (?, ?)",
+                    (str(issue_id), json.dumps(record)),
+                )
+        meta = data.get("pipeline_meta", {}) or {}
+        for stage, record in meta.items():
+            conn.execute(
+                "INSERT OR REPLACE INTO pipeline_meta (stage, data) VALUES (?, ?)",
+                (str(stage), json.dumps(record)),
+            )
 
-def _save(store: dict) -> None:
-    with open(STORE_FILE, "w") as f:
-        json.dump(store, f, indent=2)
+    backup = STORE_FILE + ".migrated"
+    try:
+        os.replace(STORE_FILE, backup)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -65,24 +116,42 @@ def _save(store: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def get_record(section: str, issue_id: int) -> Optional[dict]:
-    return _load()[section].get(str(issue_id))
+    _validate_section(section)
+    with _conn() as conn:
+        row = conn.execute(
+            f"SELECT data FROM {section} WHERE issue_id = ?",
+            (str(issue_id),),
+        ).fetchone()
+    if row is None:
+        return None
+    return json.loads(row[0])
 
 
 def set_record(section: str, issue_id: int, data: dict) -> None:
-    store = _load()
-    store[section][str(issue_id)] = data
-    _save(store)
+    _validate_section(section)
+    with _conn() as conn:
+        conn.execute(
+            f"INSERT OR REPLACE INTO {section} (issue_id, data) VALUES (?, ?)",
+            (str(issue_id), json.dumps(data)),
+        )
 
 
 def all_records(section: str) -> list:
-    store = _load()
-    return [{"issue_id": int(k), **v} for k, v in store[section].items()]
+    _validate_section(section)
+    with _conn() as conn:
+        rows = conn.execute(
+            f"SELECT issue_id, data FROM {section}"
+        ).fetchall()
+    return [{"issue_id": int(k), **json.loads(v)} for k, v in rows]
 
 
 def delete_record(section: str, issue_id: int) -> None:
-    store = _load()
-    store[section].pop(str(issue_id), None)
-    _save(store)
+    _validate_section(section)
+    with _conn() as conn:
+        conn.execute(
+            f"DELETE FROM {section} WHERE issue_id = ?",
+            (str(issue_id),),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -133,9 +202,9 @@ def get_approval(issue_id: int) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 # Stage 3 — Scope (formerly "Architect")
 #
-# The JSON section name `architect_plans` is retained for backward
-# compatibility; per-record `architect_status`/`architected_at` are
-# normalised to `scope_status`/`scoped_at` on read.
+# The table name `architect_plans` is retained for backward compatibility;
+# per-record `architect_status`/`architected_at` are normalised to
+# `scope_status`/`scoped_at` on read.
 # ---------------------------------------------------------------------------
 
 def _normalise_scope_plan(plan: Optional[dict]) -> Optional[dict]:
@@ -218,18 +287,17 @@ def update_execution_status(
     prs: Optional[list] = None,
     completed_at: Optional[str] = None,
 ) -> None:
-    store = _load()
-    key = str(issue_id)
-    if key not in store["executions"]:
+    current = get_record("executions", issue_id)
+    if current is None:
         return
-    store["executions"][key]["status"] = status
+    current["status"] = status
     if outcome:
-        store["executions"][key]["outcome_summary"] = outcome
+        current["outcome_summary"] = outcome
     if prs is not None:
-        store["executions"][key]["pull_requests"] = prs
+        current["pull_requests"] = prs
     if completed_at:
-        store["executions"][key]["completed_at"] = completed_at
-    _save(store)
+        current["completed_at"] = completed_at
+    set_record("executions", issue_id, current)
 
 
 def all_executions() -> list:
@@ -242,19 +310,30 @@ def all_executions() -> list:
 # ---------------------------------------------------------------------------
 
 def get_pipeline_meta(stage: str) -> Optional[dict]:
-    return _load().get("pipeline_meta", {}).get(stage)
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT data FROM pipeline_meta WHERE stage = ?",
+            (stage,),
+        ).fetchone()
+    if row is None:
+        return None
+    return json.loads(row[0])
 
 
 def set_pipeline_meta(stage: str, data: dict) -> None:
-    s = _load()
-    s["pipeline_meta"][stage] = data
-    _save(s)
+    with _conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO pipeline_meta (stage, data) VALUES (?, ?)",
+            (stage, json.dumps(data)),
+        )
 
 
 def clear_pipeline_meta(stage: str) -> None:
-    s = _load()
-    s["pipeline_meta"].pop(stage, None)
-    _save(s)
+    with _conn() as conn:
+        conn.execute(
+            "DELETE FROM pipeline_meta WHERE stage = ?",
+            (stage,),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +346,10 @@ def get_optimization(issue_id: int) -> Optional[dict]:
 
 def set_optimization(issue_id: int, data: dict) -> None:
     set_record("optimizations", issue_id, data)
+
+
+def clear_optimization(issue_id: int) -> None:
+    delete_record("optimizations", issue_id)
 
 
 def all_optimizations() -> list:
@@ -293,14 +376,16 @@ def confidence_label(score: int) -> tuple:
 
 def migrate_legacy_stores() -> None:
     """
-    Migrate sessions.json → executions section
-    and triage_store.json → architect_plans section (ScopePlan records).
+    Run every legacy-to-current migration in order:
+      1. pipeline_store.json     → SQLite tables
+      2. sessions.json           → executions section
+      3. triage_store.json       → architect_plans section (ScopePlan records)
 
-    Safe to call on every app startup — no-op if already migrated.
-    Preserves the legacy files; does not delete them.
+    Safe to call on every app startup — each step is a no-op once migrated.
+    Legacy files are renamed (pipeline_store.json → .migrated) or left in
+    place (sessions.json, triage_store.json) depending on prior behaviour.
     """
-    store = _load()
-    migrated = False
+    _migrate_from_json()
 
     # Migrate sessions.json → executions
     if os.path.exists(LEGACY_SESSIONS_FILE):
@@ -308,20 +393,20 @@ def migrate_legacy_stores() -> None:
             with open(LEGACY_SESSIONS_FILE, "r") as f:
                 sessions = json.load(f)
             for issue_id_str, session in sessions.items():
-                if issue_id_str not in store["executions"]:
-                    store["executions"][issue_id_str] = {
-                        "issue_id": int(issue_id_str),
-                        "session_id": session.get("session_id", "unknown"),
-                        "session_url": session.get("session_url", ""),
-                        "status": session.get("status", "In Progress"),
-                        "outcome_summary": session.get("outcome_summary", ""),
-                        "pull_requests": session.get("pull_requests", []),
-                        "dispatched_at": session.get("dispatched_at", datetime.now().isoformat()),
-                        "completed_at": None,
-                        "estimated_lines_changed": 0,
-                        "estimated_files": [],
-                    }
-                    migrated = True
+                if get_record("executions", issue_id_str) is not None:
+                    continue
+                set_record("executions", issue_id_str, {
+                    "issue_id": int(issue_id_str),
+                    "session_id": session.get("session_id", "unknown"),
+                    "session_url": session.get("session_url", ""),
+                    "status": session.get("status", "In Progress"),
+                    "outcome_summary": session.get("outcome_summary", ""),
+                    "pull_requests": session.get("pull_requests", []),
+                    "dispatched_at": session.get("dispatched_at", datetime.now().isoformat()),
+                    "completed_at": None,
+                    "estimated_lines_changed": 0,
+                    "estimated_files": [],
+                })
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -332,39 +417,36 @@ def migrate_legacy_stores() -> None:
             with open(LEGACY_TRIAGE_FILE, "r") as f:
                 triage = json.load(f)
             for issue_id_str, t in triage.items():
-                if issue_id_str not in store["architect_plans"]:
-                    status = t.get("status", "complete")
-                    if status == "pending":
-                        scope_status = "pending"
-                    elif status == "error":
-                        scope_status = "error"
-                    else:
-                        scope_status = "complete"
+                if get_record("architect_plans", issue_id_str) is not None:
+                    continue
+                status = t.get("status", "complete")
+                if status == "pending":
+                    scope_status = "pending"
+                elif status == "error":
+                    scope_status = "error"
+                else:
+                    scope_status = "complete"
 
-                    store["architect_plans"][issue_id_str] = {
-                        "issue_id": int(issue_id_str),
-                        "confidence_score": t.get("confidence_score", 0),
-                        "confidence_reasoning": t.get("confidence_reasoning", ""),
-                        "root_cause_hypothesis": t.get("root_cause_hypothesis", ""),
-                        "affected_files": t.get("affected_files", []),
-                        "estimated_lines_changed": t.get("estimated_lines_changed", 0),
-                        # next_steps → task_breakdown
-                        "task_breakdown": t.get("next_steps", t.get("task_breakdown", [])),
-                        "dependencies": t.get("dependencies", []),
-                        "risks": t.get("risks", []),
-                        "session_id": t.get("session_id", "unknown"),
-                        "session_url": t.get("session_url", ""),
-                        "scope_status": scope_status,
-                        "error": t.get("error"),
-                        "scoped_at": t.get(
-                            "triaged_at",
-                            t.get("architected_at",
-                                  t.get("scoped_at", datetime.now().isoformat())),
-                        ),
-                    }
-                    migrated = True
+                set_record("architect_plans", issue_id_str, {
+                    "issue_id": int(issue_id_str),
+                    "confidence_score": t.get("confidence_score", 0),
+                    "confidence_reasoning": t.get("confidence_reasoning", ""),
+                    "root_cause_hypothesis": t.get("root_cause_hypothesis", ""),
+                    "affected_files": t.get("affected_files", []),
+                    "estimated_lines_changed": t.get("estimated_lines_changed", 0),
+                    # next_steps → task_breakdown
+                    "task_breakdown": t.get("next_steps", t.get("task_breakdown", [])),
+                    "dependencies": t.get("dependencies", []),
+                    "risks": t.get("risks", []),
+                    "session_id": t.get("session_id", "unknown"),
+                    "session_url": t.get("session_url", ""),
+                    "scope_status": scope_status,
+                    "error": t.get("error"),
+                    "scoped_at": t.get(
+                        "triaged_at",
+                        t.get("architected_at",
+                              t.get("scoped_at", datetime.now().isoformat())),
+                    ),
+                })
         except (json.JSONDecodeError, OSError):
             pass
-
-    if migrated:
-        _save(store)

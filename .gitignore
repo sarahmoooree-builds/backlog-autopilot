@@ -1,5 +1,6 @@
-.env
-sessions.json
-triage_store.json
+pipeline_store.json
+pipeline_store.json.migrated
+pipeline_store.db
 __pycache__/
 *.pyc
+.env
