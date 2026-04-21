@@ -348,6 +348,10 @@ def set_optimization(issue_id: int, data: dict) -> None:
     set_record("optimizations", issue_id, data)
 
 
+def clear_optimization(issue_id: int) -> None:
+    delete_record("optimizations", issue_id)
+
+
 def all_optimizations() -> list:
     return all_records("optimizations")
 

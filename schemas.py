@@ -167,15 +167,26 @@ class ExecutionSession(TypedDict):
 # Retrospective analysis comparing plan vs. reality.
 # ---------------------------------------------------------------------------
 
-class OptimizationRecord(TypedDict):
+class _OptimizationRecordBase(TypedDict):
+    # Required on every record, regardless of optimizer_mode.
     issue_id: int
     planned_score: dict             # PlannerScore snapshot
     scope_confidence: int           # confidence_score from ScopePlan
     actual_status: str              # terminal ExecutionSession status
     actual_pr_count: int
     estimation_accuracy: str        # "over" | "under" | "accurate"
-    lines_delta: int                # proxy: positive = underestimate
-    files_delta: int                # actual files - estimated files (proxy)
+    lines_delta: int                # positive = underestimate
+    files_delta: int                # actual files - estimated files
     pattern_tags: list              # e.g. ["fast-completion", "confidence-mismatch"]
     optimizer_notes: str
     analyzed_at: str
+    optimizer_mode: str             # "rule" | "devin"
+
+
+class OptimizationRecord(_OptimizationRecordBase, total=False):
+    # Devin-powered path only (absent / None for rule-based records).
+    session_id: Optional[str]       # Devin session id
+    session_url: Optional[str]      # Devin session url
+    actual_lines_changed: Optional[int]   # real diff stats from PR
+    actual_files_changed: Optional[list]  # real files from PR diff
+    failure_root_cause: Optional[str]     # why a session got blocked

@@ -62,7 +62,7 @@ GitHub Issues
          │ ExecutionSession
          ▼
 ┌─────────────────┐
-│  Stage 5        │  optimizer.py
+│  Stage 5        │  optimizer.py (rule-based) / optimizer.py → Devin (issue-optimizer)
 │  OPTIMIZER      │  Compare estimated vs. actual, surface patterns, recommend adjustments
 └─────────────────┘
          │ OptimizationRecord
@@ -179,20 +179,33 @@ estimated_files
 
 ### Stage 5: Optimizer (`optimizer.py`)
 
-**What it does:**
+The Optimizer offers two paths, chosen from the **Optimizer mode** toggle in the UI:
+
+**Rule-based (fast):**
 - Reads all terminal `ExecutionSession` records and compares them to their `ScopePlan`
 - Estimates accuracy (over/under/accurate) using a proxy model (Blocked = underestimate,
   extra PRs = scope crept)
-- Tags recurring patterns: `fast-completion`, `confidence-mismatch`, `underestimated-scope`,
-  `low-effort-win`, `investigation-leak`, `auth-false-positive`
-- Produces heuristic recommendations for adjusting Planner weights or Ingest thresholds
-- Run on demand via the "Run Optimizer" button in the UI
+- Runs locally in seconds; no external API calls
 
-**What it does NOT do:** call Devin, read the codebase, require any external API
+**Devin-powered (thorough):**
+- Dispatches a single Devin session using the `issue-optimizer` subagent
+- Fetches real PR diff stats (lines added/removed, files changed) from the
+  finserv-platform repo for every completed execution
+- Reads blocked-session logs to infer `failure_root_cause`
+- Produces enriched records with real (not proxy) `lines_delta` / `files_delta`
+
+Both paths:
+- Tag recurring patterns: `fast-completion`, `confidence-mismatch`, `underestimated-scope`,
+  `low-effort-win`, `investigation-leak`, `auth-false-positive`
+- Produce heuristic recommendations for adjusting Planner weights or Ingest thresholds
+- Write to the same `optimizations` store section (records carry `optimizer_mode: "rule" | "devin"`)
+
+**What it does NOT do (rule-based path):** call Devin, read the codebase, require any external API
 
 **Output schema:** `OptimizationRecord` — issue_id, planned_score, scope_confidence,
 actual_status, actual_pr_count, estimation_accuracy, lines_delta, files_delta,
-pattern_tags, optimizer_notes, analyzed_at
+pattern_tags, optimizer_notes, optimizer_mode, analyzed_at — plus (Devin-powered only)
+session_id, session_url, actual_lines_changed, actual_files_changed, failure_root_cause
 
 ---
 
@@ -240,7 +253,7 @@ All schemas are defined in `schemas.py`.
 | Planner | `planner.py` | None (rule-based) |
 | Scope | `scope.py` | `issue-triager` (reads codebase, returns JSON plan) |
 | Executor | `executor.py` | `issue-explorer` (confirms root cause) + `issue-fixer` (implements) |
-| Optimizer | `optimizer.py` | None (reads stored data) |
+| Optimizer | `optimizer.py` | `issue-optimizer` (Devin-powered mode only; rule-based mode uses no subagent) |
 
 Subagent definitions are in `finserv-platform/.devin/agents/`:
 - `issue-triager/AGENT.md` — read-only analysis, produces confidence JSON
@@ -248,7 +261,7 @@ Subagent definitions are in `finserv-platform/.devin/agents/`:
 - `issue-fixer/AGENT.md` — minimum fix, tests, PR
 - `issue-planner/AGENT.md` — scores/ranks a batch of ingested issues (future use)
 - `issue-architect/AGENT.md` — produces build-ready plan for one issue (future use)
-- `issue-optimizer/AGENT.md` — retrospective pattern analysis (future use)
+- `issue-optimizer/AGENT.md` — retrospective pattern analysis (reads real PR diffs + blocked-session logs)
 
 ---
 
