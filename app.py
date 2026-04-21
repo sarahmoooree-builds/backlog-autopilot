@@ -573,7 +573,12 @@ with tab_pipeline:
 
     with a2:
         if st.button("Clear selection", disabled=not currently_selected):
-            for iid in list(st.session_state.selected_ids):
+            # Only reset widget state for issues that are still selectable.
+            # Dispatched / in-progress issues render via the disabled-checkbox
+            # path with value=True; Streamlit ignores `value=` once a key has
+            # state, so touching their keys here would make them visually
+            # unchecked even though they're locked in.
+            for iid in list(st.session_state.selected_ids & selectable_ids):
                 st.session_state[f"select_{iid}"] = False
             st.session_state.selected_ids.clear()
             st.rerun()
