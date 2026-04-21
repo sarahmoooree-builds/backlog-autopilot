@@ -104,20 +104,59 @@ def architect_issue(planned_issue: dict) -> dict:
         return err
 
     # --- Step 4: Extract and save the architect JSON ---
-    # Attempt extraction before checking for "blocked" — Devin often outputs
-    # the full plan and then waits for further instructions ("blocked" in the API).
-    plan_data = _extract_architect_json(result)
+    # In the Devin v3 API the session-retrieval response does NOT include
+    # messages — they live behind a separate paginated endpoint. Fetch them
+    # explicitly before trying to parse the structured plan.
+    final_status = (result.get("status") or "").lower()
+    final_detail = (result.get("status_detail") or "").lower()
+    has_structured_output = bool(result.get("structured_output"))
+    print(
+        f"[architect] Session terminal state for issue #{issue_id}: "
+        f"status={final_status!r} detail={final_detail!r} "
+        f"structured_output_present={has_structured_output}"
+    )
+
+    messages = _fetch_messages(session_id, headers)
+    print(
+        f"[architect] Fetched {len(messages)} message(s) for issue #{issue_id} "
+        f"(devin-authored: {sum(1 for m in messages if (m.get('source') or '').lower() == 'devin')})"
+    )
+
+    # Attempt extraction even when the session is still 'running' +
+    # 'waiting_for_user' / 'finished' — Devin often emits the full JSON plan
+    # and then waits for further instructions rather than fully exiting.
+    plan_data, plan_source = _extract_architect_json(result, messages)
 
     if not plan_data:
-        final_status = result.get("status", "").lower()
-        detail = " (session awaiting further instructions)" if final_status == "blocked" else ""
+        suspended_note = (
+            " (session was suspended before producing a plan)"
+            if final_status == "suspended" else ""
+        )
+        errored_note = (
+            " (session reported an error state)"
+            if final_status == "error" else ""
+        )
+        awaiting_note = (
+            " (session awaiting further instructions)"
+            if final_detail == "waiting_for_user" else ""
+        )
+        print(
+            f"[architect] Could not parse architect JSON for issue #{issue_id} "
+            f"— recording error. status={final_status!r} detail={final_detail!r}"
+        )
         err = _error_plan(
             issue_id, session_url,
-            f"Devin finished but architect JSON could not be parsed{detail}. Session: {session_url}"
+            f"Devin finished but architect JSON could not be parsed"
+            f"{suspended_note}{errored_note}{awaiting_note}. Session: {session_url}"
         )
         err["session_id"] = session_id
         store.set_architect_plan(issue_id, err)
         return err
+
+    print(
+        f"[architect] Parsed architect JSON for issue #{issue_id} "
+        f"(source={plan_source!r}, status={final_status!r}, detail={final_detail!r})"
+    )
 
     architect_plan = {
         "issue_id": issue_id,
@@ -213,6 +252,19 @@ def _error_plan(issue_id: int, session_url: str, error_msg: str) -> dict:
     }
 
 
+# Devin v3 statuses the architect treats as "still working" — anything else
+# is treated as terminal. See:
+# https://docs.devin.ai/api-reference/v3/sessions/get-organizations-session
+_NON_TERMINAL_STATUSES = (
+    "new", "creating", "claimed", "running", "resuming",
+    # legacy aliases retained for safety if older payloads appear
+    "starting", "queued", "initializing", "created",
+)
+# status_detail values (with status="running") that indicate Devin has
+# produced its final work product and is simply idle/awaiting the next step.
+_WORK_PRODUCT_READY_DETAILS = ("waiting_for_user", "finished")
+
+
 def _poll_until_done(session_id: str, headers: dict):
     """
     Poll the Devin session every POLL_INTERVAL seconds until a terminal state
@@ -232,14 +284,17 @@ def _poll_until_done(session_id: str, headers: dict):
             )
             if response.status_code == 200:
                 session = response.json()
-                status = session.get("status", "unknown").lower()
-                detail = session.get("status_detail", "")
+                status = (session.get("status") or "unknown").lower()
+                detail = (session.get("status_detail") or "").lower()
                 print(f"[architect] Poll #{attempt}: status={status!r} detail={detail!r}")
-                _NON_TERMINAL = ("running", "starting", "queued", "initializing", "created", "claimed")
-                if status not in _NON_TERMINAL:
+                if status not in _NON_TERMINAL_STATUSES:
+                    print(f"[architect] Poll #{attempt}: terminal status reached ({status!r})")
                     return session
-                if detail == "waiting_for_user":
-                    print(f"[architect] Poll #{attempt}: Devin finished (waiting_for_user)")
+                if detail in _WORK_PRODUCT_READY_DETAILS:
+                    print(
+                        f"[architect] Poll #{attempt}: Devin work product ready "
+                        f"(status={status!r}, detail={detail!r})"
+                    )
                     return session
             else:
                 print(f"[architect] Poll #{attempt}: HTTP {response.status_code}")
@@ -252,50 +307,125 @@ def _poll_until_done(session_id: str, headers: dict):
     return None
 
 
-def _extract_architect_json(session_data: dict):
+def _fetch_messages(session_id: str, headers: dict) -> list:
+    """
+    Fetch all messages for a Devin session from the v3 messages endpoint.
+
+    The v3 session-retrieval endpoint does not include messages inline — they
+    are served via a separate paginated endpoint. Returns a list of message
+    dicts in chronological order (may be empty on error).
+    """
+    url = f"{DEVIN_API_BASE}/sessions/{session_id}/messages"
+    messages: list = []
+    cursor = None
+    pages = 0
+    max_pages = 20  # hard stop to avoid runaway pagination
+
+    while pages < max_pages:
+        params = {"first": 200}
+        if cursor:
+            params["after"] = cursor
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=20)
+        except requests.exceptions.RequestException as e:
+            print(f"[architect] _fetch_messages: request error — {e}")
+            break
+        if response.status_code != 200:
+            print(
+                f"[architect] _fetch_messages: HTTP {response.status_code} "
+                f"— {response.text[:200]}"
+            )
+            break
+        payload = response.json()
+        items = payload.get("items") or []
+        messages.extend(items)
+        if not payload.get("has_next_page"):
+            break
+        cursor = payload.get("end_cursor")
+        if not cursor:
+            break
+        pages += 1
+    return messages
+
+
+_REQUIRED_PLAN_FIELDS = frozenset({
+    "confidence_score", "confidence_reasoning", "root_cause_hypothesis",
+    "affected_files", "estimated_lines_changed", "task_breakdown",
+    "dependencies", "risks",
+})
+
+
+def _extract_architect_json(session_data: dict, messages=None):
     """
     Extract the structured architect JSON from the Devin session output.
-    Checks structured_output first, then scans messages in reverse.
-    Returns the parsed dict if all required fields are present, else None.
-    """
-    required_fields = {
-        "confidence_score", "confidence_reasoning", "root_cause_hypothesis",
-        "affected_files", "estimated_lines_changed", "task_breakdown",
-        "dependencies", "risks",
-    }
 
-    # Try structured_output first
+    Order of precedence:
+      1. session_data["structured_output"] (populated when a
+         structured_output_schema is provided on session create).
+      2. Devin-authored messages (fetched separately from the v3 messages
+         endpoint), scanned most-recent first. Each message uses the
+         ``message`` field in v3; we also fall back to ``content`` for
+         forward/backward compatibility.
+
+    Returns a ``(plan_dict, source)`` tuple where ``source`` is one of
+    ``"structured_output"``, ``"messages"``, or ``None`` (when no plan could
+    be extracted). ``plan_dict`` is ``None`` iff ``source`` is ``None``.
+    """
+    # 1. structured_output
     structured = session_data.get("structured_output")
     if structured and isinstance(structured, dict):
-        if required_fields.issubset(structured.keys()):
-            return structured
+        if _REQUIRED_PLAN_FIELDS.issubset(structured.keys()):
+            return structured, "structured_output"
 
-    # Scan messages in reverse (most recent first) for a JSON block
-    messages = (session_data.get("messages")
-                or session_data.get("items")
-                or [])
-    for message in reversed(messages):
-        content = message.get("content", "")
+    # 2. scan messages in reverse (most recent first)
+    candidates = messages
+    if candidates is None:
+        # Backward-compat: some callers may still pass session payloads that
+        # contain inline messages under legacy keys.
+        candidates = (session_data.get("messages")
+                      or session_data.get("items")
+                      or [])
+
+    for message in reversed(candidates):
+        # v3 uses "message"; older payloads used "content". Accept either.
+        content = message.get("message") or message.get("content") or ""
+        source = (message.get("source") or "").lower()
+        # Skip user-authored messages when we can identify them.
+        if source and source != "devin":
+            continue
         if not content:
             continue
 
-        # Try the whole content as JSON
-        try:
-            parsed = json.loads(content.strip())
-            if required_fields.issubset(parsed.keys()):
-                return parsed
-        except (json.JSONDecodeError, AttributeError):
-            pass
+        parsed = _parse_plan_from_text(content)
+        if parsed is not None:
+            return parsed, "messages"
 
-        # Try to find a JSON object within the content
-        start = content.find("{")
-        end = content.rfind("}") + 1
-        if start >= 0 and end > start:
-            try:
-                parsed = json.loads(content[start:end])
-                if required_fields.issubset(parsed.keys()):
-                    return parsed
-            except json.JSONDecodeError:
-                pass
+    return None, None
+
+
+def _parse_plan_from_text(text: str):
+    """Try to extract a valid architect-plan JSON object from a text blob."""
+    if not isinstance(text, str):
+        return None
+    stripped = text.strip()
+
+    # Try the whole blob as JSON.
+    try:
+        parsed = json.loads(stripped)
+        if isinstance(parsed, dict) and _REQUIRED_PLAN_FIELDS.issubset(parsed.keys()):
+            return parsed
+    except (json.JSONDecodeError, AttributeError):
+        pass
+
+    # Try the largest balanced JSON object within the text.
+    start = stripped.find("{")
+    end = stripped.rfind("}") + 1
+    if start >= 0 and end > start:
+        try:
+            parsed = json.loads(stripped[start:end])
+            if isinstance(parsed, dict) and _REQUIRED_PLAN_FIELDS.issubset(parsed.keys()):
+                return parsed
+        except json.JSONDecodeError:
+            pass
 
     return None
