@@ -62,7 +62,12 @@ def create_session(prompt: str, bypass_approval: bool = True,
     if idempotency_key:
         headers["Idempotency-Key"] = idempotency_key
 
-    response = SESSION.post(
+    # POST goes through bare requests.post (not SESSION): creating a Devin
+    # session is non-idempotent and urllib3's Retry does NOT honour
+    # ``allowed_methods=["GET"]`` on connection-level errors, so POSTing via
+    # SESSION would silently spawn duplicate orphaned sessions on DNS /
+    # connection-refused / connect-timeout failures.
+    response = requests.post(
         f"{DEVIN_API_BASE}/sessions",
         headers=headers,
         json=payload,

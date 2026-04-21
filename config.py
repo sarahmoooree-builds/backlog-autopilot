@@ -49,11 +49,17 @@ DEVIN_MAX_CONCURRENT_SESSIONS = int(os.getenv("DEVIN_MAX_CONCURRENT_SESSIONS", "
 def _build_session() -> requests.Session:
     """Build a requests.Session with retries on transient HTTP failures.
 
-    Only idempotent methods are retried. POST is intentionally excluded
-    because every POST in this project creates a Devin session at
-    ``/sessions`` — an auto-retry on a 5xx / 429 / dropped connection
-    would create duplicate sessions on the server, leaving the first one
-    orphaned and running autonomously against the target repo.
+    Only idempotent methods are retried. POST is listed nowhere — and,
+    more importantly, every POST in this project (Devin session creation
+    at ``/sessions``) bypasses this session entirely and uses
+    ``requests.post`` directly. In urllib3's ``Retry``, ``allowed_methods``
+    is only consulted for status- and read-error retries; the
+    connection-error path retries regardless of method, so POSTing via
+    ``SESSION`` would silently spawn duplicate orphaned Devin sessions on
+    DNS / connection-refused / connect-timeout failures. Keep the
+    ``allowed_methods=["GET"]`` setting defensive, but rely on the
+    per-call-site ``requests.post`` to guarantee non-idempotent requests
+    are never retried.
     """
     s = requests.Session()
     retry = Retry(

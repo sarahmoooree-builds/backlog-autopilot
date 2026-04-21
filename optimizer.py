@@ -442,7 +442,10 @@ def run_optimizer_with_devin() -> list:
     # --- Step 2: create the Devin session ---
     print(f"[optimizer] Creating Devin session for {len(executions)} terminal execution(s)…")
     try:
-        response = SESSION.post(
+        # See devin_client.create_session — POST uses bare requests.post to
+        # avoid urllib3 retrying non-idempotent session creation on
+        # connection errors (allowed_methods=["GET"] is not honoured there).
+        response = requests.post(
             f"{DEVIN_API_BASE}/sessions",
             headers=headers,
             json={"prompt": prompt, "bypass_approval": True},
