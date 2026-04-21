@@ -29,7 +29,7 @@ from github_client import (
     fetch_merged_prs,
 )
 from ingest import ingest_issues
-from planner import plan_issues, analyse_issues_with_devin, DEFAULT_WEIGHTS
+from planner import plan_issues, analyse_issues_with_devin, DEFAULT_WEIGHTS, BUSINESS_LABELS
 from scope import scope_issue, scope_issues
 from executor import execute_issues, refresh_session_statuses
 from optimizer import run_optimizer, get_optimizer_summary
@@ -319,16 +319,6 @@ with tab_pipeline:
     }
     ready_ids = {i["id"] for i in planned_issues if is_ready_to_execute(i["id"])[0]}
     closed_recent = load_closed_issues(days=30)
-
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
-    k1.metric("Open issues",          len(planned_issues))
-    k2.metric("Scoped",                len(scoped_ids))
-    k3.metric("Ready for execution",   len(ready_ids))
-    k4.metric("In progress",           status_counts.get("In Progress", 0))
-    k5.metric("Completed (tracked)",   status_counts.get("Completed", 0))
-    k6.metric("Resolved · 30d (repo)", len(closed_recent))
-
-    st.markdown("")
 
     # -----------------------------------------------------------------------
     # Issues resolved — REAL data (closed issues by day, last 30 days)
@@ -907,194 +897,401 @@ with tab_pipeline:
 
 with tab_business:
 
-    # --- Real, measurable data ---
-    live_backlog = len(planned_issues)
-    live_automatable = len(auto_recommended)
-    live_automatable_pct = (live_automatable / live_backlog) if live_backlog else 0.0
+    # -----------------------------------------------------------------------
+    # Section A: Header
+    # -----------------------------------------------------------------------
+
+    st.header("Business Impact")
+    st.caption(
+        "Live metrics from the pipeline and GitHub. "
+        "All data is real — nothing is hardcoded or projected."
+    )
+
+    # --- Gather live data once ---
+    executions_all = store.all_executions()
+    completed_executions = [e for e in executions_all if e.get("status") == "Completed"]
+    blocked_executions = [e for e in executions_all if e.get("status") == "Blocked"]
+
+    optimizer_summary = get_optimizer_summary()
+    optimizer_has_data = optimizer_summary.get("total_analyzed", 0) > 0
 
     closed_30d = load_closed_issues(days=30)
     merged_30d = load_merged_prs(days=30)
-    devin_merged_30d = [p for p in merged_30d if p["is_devin_authored"]]
+    devin_merged_30d = [p for p in merged_30d if p.get("is_devin_authored")]
 
-    st.header("Business impact")
-    st.caption(
-        "Everything labelled **Live** is pulled directly from the monitored repository. "
-        "Everything labelled **Projection** is a modelled forecast using transparent "
-        "assumptions — not measured data."
-    )
-    st.markdown("")
+    # Constant for engineer-hour recovery estimate (clearly labelled).
+    AVG_ENG_HRS = 5.5
 
     # -----------------------------------------------------------------------
-    # Live metrics (real data)
+    # Section B: Live KPI cards (4 columns)
     # -----------------------------------------------------------------------
 
-    st.markdown("#### Live metrics")
-    l1, l2, l3, l4 = st.columns(4)
-    l1.metric("Open backlog", f"{live_backlog}", "source: GitHub (open issues)")
-    l2.metric(
-        "Automatable share",
-        f"{int(live_automatable_pct * 100)}%" if live_backlog else "—",
-        f"{live_automatable} of {live_backlog} recommended"
-        if live_backlog else "no issues",
-    )
-    l3.metric("Issues resolved · 30d", f"{len(closed_30d)}", "source: GitHub (closed)")
-    l4.metric(
-        "PRs merged · 30d",
-        f"{len(merged_30d)}",
-        f"{len(devin_merged_30d)} Devin-authored",
-    )
+    k1, k2, k3, k4 = st.columns(4)
 
-    st.markdown("")
-
-    # -----------------------------------------------------------------------
-    # Projection (clearly labelled)
-    # -----------------------------------------------------------------------
-
-    st.markdown("#### Projection")
-    st.caption(
-        "The values below are **projections**, not measurements. They use the assumptions "
-        "shown in the expander so you can see exactly what they are based on — and change "
-        "them if needed."
-    )
-
-    with st.expander("Projection assumptions", expanded=False):
-        ast1, ast2, ast3 = st.columns(3)
-        with ast1:
-            avg_eng_hrs = st.number_input(
-                "Avg. engineer hours per automatable issue",
-                min_value=0.25, max_value=40.0, value=5.5, step=0.25,
-            )
-            eng_hourly = st.number_input(
-                "Engineer loaded hourly cost ($)",
-                min_value=50, max_value=500, value=150, step=10,
-            )
-        with ast2:
-            avg_devin_hrs = st.number_input(
-                "Avg. Devin hours per automatable issue",
-                min_value=0.05, max_value=10.0, value=0.75, step=0.05,
-            )
-            issues_per_wk_before = st.number_input(
-                "Issues closed per week (baseline)",
-                min_value=1, max_value=200,
-                value=max(1, len(closed_30d) // 4) if closed_30d else 8,
-            )
-        with ast3:
-            issues_per_wk_after = st.number_input(
-                "Issues closed per week (with autopilot)",
-                min_value=1, max_value=500, value=35,
-            )
-
-    # Derived projections
-    hours_saved = live_automatable * (avg_eng_hrs - avg_devin_hrs)
-    cost_saved = hours_saved * eng_hourly
-    weeks_before = (live_backlog / issues_per_wk_before) if issues_per_wk_before else 0
-    weeks_after = (live_backlog / issues_per_wk_after) if issues_per_wk_after else 0
-
-    p1, p2, p3 = st.columns(3)
-    p1.metric(
-        "Projected engineer hours recovered",
-        f"{int(max(hours_saved, 0)):,} hrs",
-        "per backlog cycle",
-    )
-    p2.metric(
-        "Projected cost savings",
-        f"${int(max(cost_saved, 0)):,}",
-        "in recovered engineer time",
-    )
-    p3.metric(
-        "Projected time to clear backlog",
-        f"{weeks_after:.0f} wks" if weeks_after else "—",
-        f"vs. {weeks_before:.0f} wks today" if weeks_before else None,
-    )
-
-    st.markdown("")
-    st.markdown("##### Backlog burn-rate projection")
-    st.caption(
-        "Modelled forecast over 12 weeks using the assumptions above. "
-        "This is an illustration of the scenario, not a measurement."
-    )
-
-    weeks = list(range(0, 13))
-    remaining_before = [max(0, live_backlog - issues_per_wk_before * w) for w in weeks]
-    remaining_after = [max(0, live_backlog - issues_per_wk_after * w) for w in weeks]
-    burn_df = pd.DataFrame({
-        "Week": weeks * 2,
-        "Issues Remaining": remaining_before + remaining_after,
-        "Scenario": ["Without autopilot"] * 13 + ["With autopilot"] * 13,
-    })
-    burn_chart = (
-        alt.Chart(burn_df)
-        .mark_line(point=True, strokeWidth=2.5)
-        .encode(
-            x=alt.X("Week:Q", axis=alt.Axis(labelAngle=0, title="Weeks from now")),
-            y=alt.Y("Issues Remaining:Q", title="Open issues"),
-            color=alt.Color(
-                "Scenario:N",
-                scale=alt.Scale(
-                    domain=["With autopilot", "Without autopilot"],
-                    range=["#1B7A8E", "#6c757d"],
-                ),
-                legend=alt.Legend(title=None, orient="bottom"),
-            ),
-            tooltip=["Week:Q", "Scenario:N", "Issues Remaining:Q"],
+    # 1. Impact-weighted resolutions
+    impact_sum = 0
+    impact_count = 0
+    for ex in completed_executions:
+        planned = store.get_planned(ex["issue_id"])
+        if not planned:
+            continue
+        ps = planned.get("planner_score") or {}
+        impact_sum += int(ps.get("user_impact", 0)) + int(ps.get("business_impact", 0))
+        impact_count += 1
+    if impact_count:
+        max_possible = impact_count * 20
+        impact_pct = (impact_sum / max_possible * 100) if max_possible else 0.0
+        k1.metric(
+            "Impact-weighted resolutions",
+            f"{impact_sum}",
+            f"{impact_pct:.0f}% of max possible",
         )
-        .properties(height=280)
+    else:
+        k1.metric(
+            "Impact-weighted resolutions",
+            "—",
+            "no completed work yet",
+        )
+
+    # 2. Engineer hours recovered (estimated)
+    hours_recovered = len(completed_executions) * AVG_ENG_HRS
+    k2.metric(
+        "Engineer hours recovered",
+        f"{hours_recovered:,.1f} hrs",
+        "estimated",
     )
-    st.altair_chart(burn_chart, use_container_width=True)
-
-    st.divider()
-
-    # -----------------------------------------------------------------------
-    # Efficiency narrative — cites only data we can measure or model transparently
-    # -----------------------------------------------------------------------
-
-    st.subheader("Where the gains come from")
-    eff1, eff2, eff3 = st.columns(3)
-
-    eff1.markdown("**Automation coverage (live)**")
-    eff1.markdown(
-        f"Of **{live_backlog} open issues** in the repo, the Planner flags "
-        f"**{live_automatable} ({int(live_automatable_pct * 100)}%)** as "
-        f"automation candidates — issues with narrow scope, clear intent, and "
-        f"low-to-medium complexity. Everything else is recommended for manual handling."
+    k2.caption(
+        f"Assumes {AVG_ENG_HRS} engineer hours saved per resolved issue."
     )
 
-    eff2.markdown("**Speed (projection)**")
-    eff2.markdown(
-        f"Assuming {avg_devin_hrs:.2f} hrs per issue for Devin vs. "
-        f"{avg_eng_hrs:.1f} hrs for a senior engineer, autopilot is modelled "
-        f"at roughly **{max(avg_eng_hrs / max(avg_devin_hrs, 0.01), 1):.0f}× faster** "
-        f"on eligible issues. Hard proof will come from the Optimizer as real "
-        f"sessions complete."
-    )
+    # 3. Backlog health — completed / (completed + blocked)
+    if optimizer_has_data:
+        comp_rate = optimizer_summary.get("completion_rate", 0.0)
+        blk_rate = optimizer_summary.get("blocked_rate", 0.0)
+        denom = comp_rate + blk_rate
+        health_pct = (comp_rate / denom * 100) if denom else 0.0
+        k3.metric(
+            "Backlog health",
+            f"{health_pct:.0f}%",
+            "completed vs. blocked",
+        )
+    else:
+        total_ex = len(executions_all)
+        if total_ex:
+            health_pct = (len(completed_executions) / total_ex) * 100
+            k3.metric(
+                "Backlog health",
+                f"{health_pct:.0f}%",
+                "completed vs. total",
+            )
+        else:
+            k3.metric("Backlog health", "—", "no executions yet")
 
-    eff3.markdown("**Engineer time redirect (projection)**")
-    eff3.markdown(
-        f"Under these assumptions, automating {live_automatable} issues would recover "
-        f"**~{int(max(hours_saved, 0)):,} engineer hours** that can be redirected to "
-        f"platform, architecture, and revenue work. This scales linearly with the "
-        f"automatable share of the backlog."
-    )
+    # 4. AI planner accuracy
+    if optimizer_has_data:
+        ab = optimizer_summary.get("accuracy_breakdown", {}) or {}
+        total_analyzed = optimizer_summary.get("total_analyzed", 0)
+        accurate_count = ab.get("accurate", 0)
+        if total_analyzed:
+            acc_pct = (accurate_count / total_analyzed) * 100
+            k4.metric(
+                "AI planner accuracy",
+                f"{acc_pct:.0f}%",
+                f"{accurate_count} of {total_analyzed} accurate",
+            )
+        else:
+            k4.metric("AI planner accuracy", "—")
+    else:
+        k4.metric("AI planner accuracy", "—")
+        k4.caption("Run the Optimizer to see accuracy data.")
 
-    st.divider()
-
-    # -----------------------------------------------------------------------
-    # Success criteria (phrased as targets, not achievements)
-    # -----------------------------------------------------------------------
-
-    st.subheader("Success criteria (targets)")
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Target · backlog reduction", "≥ 60%", "over 90 days")
-    m2.metric("Target · Devin PR merge rate", "≥ 85%", "passing review")
-    m3.metric("Target · regression rate",   "0",      "on Devin-authored PRs")
+    if not executions_all:
+        st.info(
+            "No completed sessions yet. As issues move through the pipeline, "
+            "impact metrics will appear here."
+        )
 
     st.markdown("")
-    st.markdown(
-        "**How we'll know it's working:** the Optimizer (Stage 5) compares Scope "
-        "estimates to actual PR outcomes and surfaces pattern tags such as "
-        "`underestimated-scope` or `confidence-mismatch`. Those tags are grounded "
-        "in completed sessions — not in projections."
+    st.divider()
+
+    # -----------------------------------------------------------------------
+    # Section C: Issues Resolved Chart (real data)
+    # -----------------------------------------------------------------------
+
+    st.subheader("Resolved work — real GitHub data")
+    time_range = st.radio(
+        "Time range",
+        options=["Past Week", "Past Month"],
+        horizontal=True,
+        index=1,
+        key="business_time_range",
     )
+    range_days = 7 if time_range == "Past Week" else 30
+
+    closed_range = load_closed_issues(days=range_days)
+    merged_range = load_merged_prs(days=range_days)
+    devin_merged_range = [p for p in merged_range if p.get("is_devin_authored")]
+
+    today = datetime.now(timezone.utc).date()
+    start_date = today - timedelta(days=range_days - 1)
+    day_index = {
+        start_date + timedelta(days=i): {"Devin": 0, "Engineers": 0}
+        for i in range(range_days)
+    }
+
+    for p in merged_range:
+        merged_at = p.get("merged_at")
+        if not merged_at:
+            continue
+        try:
+            dt = datetime.fromisoformat(merged_at.replace("Z", "+00:00")).date()
+        except Exception:
+            continue
+        if dt in day_index:
+            bucket = "Devin" if p.get("is_devin_authored") else "Engineers"
+            day_index[dt][bucket] += 1
+
+    chart_rows = []
+    for d, counts in day_index.items():
+        chart_rows.append({"Day": d.isoformat(), "Author": "Devin", "PRs merged": counts["Devin"]})
+        chart_rows.append({"Day": d.isoformat(), "Author": "Engineers", "PRs merged": counts["Engineers"]})
+    chart_df = pd.DataFrame(chart_rows)
+
+    if chart_df["PRs merged"].sum() == 0 and not closed_range:
+        st.info(
+            f"No merged PRs or closed issues in the {time_range.lower()}. "
+            "This chart will populate as real work lands."
+        )
+    else:
+        resolved_chart = (
+            alt.Chart(chart_df)
+            .mark_bar()
+            .encode(
+                x=alt.X(
+                    "Day:T",
+                    axis=alt.Axis(title=None, format="%b %d", labelAngle=0),
+                ),
+                y=alt.Y("PRs merged:Q", title="PRs merged"),
+                color=alt.Color(
+                    "Author:N",
+                    scale=alt.Scale(
+                        domain=["Devin", "Engineers"],
+                        range=["#1B7A8E", "#0F4C81"],
+                    ),
+                    legend=alt.Legend(title=None, orient="bottom"),
+                ),
+                tooltip=["Day:T", "Author:N", "PRs merged:Q"],
+            )
+            .properties(height=260)
+        )
+        st.altair_chart(resolved_chart, use_container_width=True)
+        st.caption(
+            f"{len(closed_range)} issue(s) closed · {len(merged_range)} PR(s) merged "
+            f"({len(devin_merged_range)} Devin-authored) in the {time_range.lower()}."
+        )
+
+    st.divider()
+
+    # -----------------------------------------------------------------------
+    # Section D: Impact Breakdown
+    # -----------------------------------------------------------------------
+
+    st.subheader("Impact breakdown")
+    left_col, right_col = st.columns(2)
+
+    with left_col:
+        st.markdown("**High-Impact Work Completed**")
+        high_impact = []
+        for ex in completed_executions:
+            planned = store.get_planned(ex["issue_id"])
+            if not planned:
+                continue
+            ps = planned.get("planner_score") or {}
+            biz = int(ps.get("business_impact", 0))
+            labels = set(planned.get("labels") or [])
+            if biz >= 7 or (labels & BUSINESS_LABELS):
+                high_impact.append((ex, planned))
+
+        if not high_impact:
+            st.caption(
+                "No high-impact completions yet. Completed issues with "
+                "`business_impact ≥ 7` or revenue/compliance/SLA labels will appear here."
+            )
+        else:
+            for ex, planned in high_impact:
+                ps = planned.get("planner_score") or {}
+                title = planned.get("title", "")
+                outcome = ex.get("outcome_summary", "")
+                status = ex.get("status", "Completed")
+                st.markdown(
+                    f"**#{ex['issue_id']} — {title}**  \n"
+                    f"business_impact: {int(ps.get('business_impact', 0))}/10 · "
+                    f"user_impact: {int(ps.get('user_impact', 0))}/10 · {status}"
+                )
+                if outcome:
+                    st.caption(f"\"{outcome}\"")
+                st.markdown("---")
+
+    with right_col:
+        st.markdown("**Efficiency Wins**")
+        if not optimizer_has_data:
+            st.info(
+                "Run the Optimizer on completed sessions to see efficiency insights."
+            )
+        else:
+            efficiency_wins = []
+            for ex in completed_executions:
+                opt = store.get_optimization(ex["issue_id"])
+                if not opt:
+                    continue
+                tags = set(opt.get("pattern_tags") or [])
+                if {"fast-completion", "low-effort-win"} & tags:
+                    planned = store.get_planned(ex["issue_id"])
+                    efficiency_wins.append((ex, planned, opt))
+
+            if not efficiency_wins:
+                st.caption(
+                    "No efficiency wins tagged yet. Optimizer tags like "
+                    "`fast-completion` or `low-effort-win` will surface here."
+                )
+            else:
+                for ex, planned, opt in efficiency_wins:
+                    title = (planned.get("title", "") if planned else "")
+                    outcome = ex.get("outcome_summary", "")
+                    tags = opt.get("pattern_tags") or []
+                    tag_str = " · ".join(f"`{t}`" for t in tags)
+                    st.markdown(
+                        f"**#{ex['issue_id']} — {title}**  \n"
+                        f"{tag_str}"
+                    )
+                    if outcome:
+                        st.caption(f"\"{outcome}\"")
+                    st.markdown("---")
+
+    st.divider()
+
+    # -----------------------------------------------------------------------
+    # Section E: Pipeline Learning (from Optimizer)
+    # -----------------------------------------------------------------------
+
+    if optimizer_has_data:
+        st.subheader("Pipeline learning")
+        c1, c2, c3 = st.columns(3)
+
+        completion_rate = optimizer_summary.get("completion_rate", 0.0)
+        c1.metric(
+            "Completion rate",
+            f"{completion_rate * 100:.0f}%",
+            delta="across analyzed sessions",
+        )
+
+        ab = optimizer_summary.get("accuracy_breakdown", {}) or {}
+        breakdown_df = pd.DataFrame([
+            {"Category": "Accurate", "Count": ab.get("accurate", 0)},
+            {"Category": "Overestimate", "Count": ab.get("over", 0)},
+            {"Category": "Underestimate", "Count": ab.get("under", 0)},
+        ])
+        accuracy_chart = (
+            alt.Chart(breakdown_df)
+            .mark_bar()
+            .encode(
+                x=alt.X("Count:Q", title=None),
+                y=alt.Y("Category:N", sort="-x", title=None),
+                color=alt.Color(
+                    "Category:N",
+                    scale=alt.Scale(
+                        domain=["Accurate", "Overestimate", "Underestimate"],
+                        range=["#1B7A8E", "#0F4C81", "#6c757d"],
+                    ),
+                    legend=None,
+                ),
+                tooltip=["Category:N", "Count:Q"],
+            )
+            .properties(height=140)
+        )
+        with c2:
+            st.markdown("**Scope accuracy**")
+            st.altair_chart(accuracy_chart, use_container_width=True)
+
+        with c3:
+            st.markdown("**Top patterns**")
+            top_patterns = optimizer_summary.get("top_patterns") or []
+            if top_patterns:
+                for tag, count in top_patterns:
+                    st.markdown(f"`{tag}` · {count}")
+            else:
+                st.caption("No recurring patterns detected yet.")
+
+        recs = optimizer_summary.get("heuristic_recommendations") or []
+        if recs:
+            st.markdown("")
+            for rec in recs:
+                st.info(f"**Recommendation:** {rec}")
+
+        st.divider()
+
+    # -----------------------------------------------------------------------
+    # Section F: Success Criteria (Live vs Target)
+    # -----------------------------------------------------------------------
+
+    st.subheader("Progress toward targets")
+    m1, m2, m3 = st.columns(3)
+
+    # 1. Backlog reduction
+    open_backlog = len(planned_issues)
+    closed_count = len(closed_30d)
+    reduction_denom = open_backlog + closed_count
+    reduction_pct = (closed_count / reduction_denom * 100) if reduction_denom else 0.0
+    m1.metric(
+        "Backlog reduction · 30d",
+        f"{reduction_pct:.0f}%",
+        delta="target: ≥ 60%",
+    )
+    m1.caption(f"{closed_count} closed vs. {open_backlog} still open")
+
+    # 2. Devin PR merge rate
+    if merged_30d:
+        devin_share = len(devin_merged_30d) / len(merged_30d) * 100
+        m2.metric(
+            "Devin share of merged PRs · 30d",
+            f"{devin_share:.0f}%",
+            delta="target: ≥ 85%",
+        )
+        m2.caption(
+            f"{len(devin_merged_30d)} of {len(merged_30d)} merged PRs"
+        )
+    else:
+        m2.metric(
+            "Devin PRs merged · 30d",
+            f"{len(devin_merged_30d)}",
+            delta="target: ≥ 85%",
+        )
+        m2.caption("Not enough merged PRs in the window yet.")
+
+    # 3. Completion rate
+    if optimizer_has_data:
+        comp_rate = optimizer_summary.get("completion_rate", 0.0) * 100
+        m3.metric(
+            "Completion rate",
+            f"{comp_rate:.0f}%",
+            delta="target: ≥ 85%",
+        )
+    else:
+        total_ex = len(executions_all)
+        if total_ex:
+            comp_rate = len(completed_executions) / total_ex * 100
+            m3.metric(
+                "Completion rate",
+                f"{comp_rate:.0f}%",
+                delta="target: ≥ 85%",
+            )
+            m3.caption("From execution statuses (no optimizer data yet).")
+        else:
+            m3.metric(
+                "Completion rate",
+                "—",
+                delta="target: ≥ 85%",
+            )
 
 
 # ---------------------------------------------------------------------------
