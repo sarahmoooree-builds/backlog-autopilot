@@ -16,10 +16,8 @@ import requests
 from datetime import datetime
 
 import devin_client
+from config import PLANNER_TIMEOUT, POLL_INTERVAL
 from priorities import PlannerStrategy, get_strategy, BALANCED_INTENT
-
-_PLANNER_TIMEOUT = 480   # 8 minutes for a full batch
-_POLL_INTERVAL   = 10
 
 # ---------------------------------------------------------------------------
 # Configurable PM weights
@@ -351,15 +349,15 @@ def plan_issues_with_devin(ingested: list) -> dict:
 
     result = devin_client.poll_until_done(
         session_id,
-        timeout=_PLANNER_TIMEOUT,
-        poll_interval=_POLL_INTERVAL,
+        timeout=PLANNER_TIMEOUT,
+        poll_interval=POLL_INTERVAL,
         label="planner",
     )
 
     if not result:
         return {"status": "error", "session_id": session_id, "session_url": session_url,
                 "issues": [],
-                "error": f"Timed out after {_PLANNER_TIMEOUT // 60} min. Session: {session_url}"}
+                "error": f"Timed out after {PLANNER_TIMEOUT // 60} min. Session: {session_url}"}
 
     # Extract JSON — try session data first, then the messages endpoint as fallback.
     parsed = devin_client.extract_json_array(result)
@@ -450,15 +448,15 @@ def analyse_issues_with_devin(raw_issues: list) -> dict:
 
     result = devin_client.poll_until_done(
         session_id,
-        timeout=_PLANNER_TIMEOUT,
-        poll_interval=_POLL_INTERVAL,
+        timeout=PLANNER_TIMEOUT,
+        poll_interval=POLL_INTERVAL,
         label="analyse",
     )
 
     if not result:
         return {"status": "error", "session_id": session_id, "session_url": session_url,
                 "issues": [],
-                "error": f"Timed out after {_PLANNER_TIMEOUT // 60} min. Session: {session_url}"}
+                "error": f"Timed out after {PLANNER_TIMEOUT // 60} min. Session: {session_url}"}
 
     parsed = devin_client.extract_json_array(result)
     if not parsed:

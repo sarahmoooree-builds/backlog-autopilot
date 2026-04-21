@@ -12,7 +12,7 @@ Usage:
     prompt = SCOPE_PROMPT.format(issue_id=..., title=..., ...)
 """
 
-TARGET_REPO = "sarahmoooree-builds/finserv-platform"
+from config import TARGET_REPO  # noqa: F401 — re-exported for backward compatibility
 
 PLATFORM_CONTEXT = """\
 FinServ Co. is an enterprise financial services platform. Their GitHub repo contains issues \

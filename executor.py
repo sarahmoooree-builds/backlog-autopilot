@@ -17,9 +17,8 @@ from datetime import datetime
 
 import devin_client
 import store
+from config import TARGET_REPO
 from prompts import EXECUTION_PROMPT
-
-TARGET_REPO = "sarahmoooree-builds/finserv-platform"
 
 
 def execute_issues(planned_issues: list) -> list:

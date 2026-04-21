@@ -13,9 +13,7 @@ from datetime import datetime
 from typing import Optional
 
 import devin_client
-
-_INGEST_TIMEOUT  = 480   # 8 minutes for a full batch
-_POLL_INTERVAL   = 10
+from config import INGEST_TIMEOUT, POLL_INTERVAL
 
 # ---------------------------------------------------------------------------
 # Classification keyword lists
@@ -233,15 +231,15 @@ def ingest_issues_with_devin(raw_issues: list) -> dict:
 
     result = devin_client.poll_until_done(
         session_id,
-        timeout=_INGEST_TIMEOUT,
-        poll_interval=_POLL_INTERVAL,
+        timeout=INGEST_TIMEOUT,
+        poll_interval=POLL_INTERVAL,
         label="ingest",
     )
 
     if not result:
         return {"status": "error", "session_id": session_id, "session_url": session_url,
                 "issues": [],
-                "error": f"Timed out after {_INGEST_TIMEOUT // 60} min. Session: {session_url}"}
+                "error": f"Timed out after {INGEST_TIMEOUT // 60} min. Session: {session_url}"}
 
     # Extract JSON array from session output.
     # First try the session data itself; if that fails, fetch the paginated

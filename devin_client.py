@@ -12,17 +12,19 @@ Error contract for create_session:
 """
 
 import json
-import os
 import time
 import requests
 from typing import Optional
-from dotenv import load_dotenv
 
-load_dotenv()
+from config import DEVIN_API_BASE, DEVIN_API_KEY, DEVIN_ORG_ID
 
-DEVIN_API_KEY = os.getenv("DEVIN_API_KEY")
-DEVIN_ORG_ID = os.getenv("DEVIN_ORG_ID")
-DEVIN_API_BASE = f"https://api.devin.ai/v3/organizations/{DEVIN_ORG_ID}"
+# Re-export so existing `from devin_client import DEVIN_API_BASE` usage keeps
+# working while config.py is the source of truth.
+__all__ = [
+    "DEVIN_API_KEY", "DEVIN_ORG_ID", "DEVIN_API_BASE",
+    "create_session", "get_session", "poll_until_done",
+    "fetch_messages", "extract_json_array", "extract_json_object",
+]
 
 # Devin v3 statuses treated as "still working" — anything else is terminal.
 # See https://docs.devin.ai/api-reference/v3/sessions/get-organizations-session

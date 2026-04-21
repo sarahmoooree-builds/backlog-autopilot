@@ -21,12 +21,8 @@ from datetime import datetime
 
 import devin_client
 import store
+from config import POLL_INTERVAL, SCOPE_TIMEOUT, TARGET_REPO
 from prompts import SCOPE_PROMPT
-
-TARGET_REPO = "sarahmoooree-builds/finserv-platform"
-
-SCOPE_TIMEOUT = 360   # seconds — Devin needs 4–6 minutes to read the codebase
-POLL_INTERVAL = 10    # seconds between status polls
 
 
 def scope_issue(planned_issue: dict) -> dict:
