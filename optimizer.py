@@ -504,10 +504,62 @@ def run_optimizer_with_devin() -> list:
                 "Devin finished but optimizer JSON array could not be parsed. "
                 f"Session: {session_url}"
             )
+
+        # --- Step 6: persist one enriched record per issue ---
+        by_id = {}
+        for r in records:
+            if not isinstance(r, dict):
+                continue
+            raw_id = r.get("issue_id")
+            if raw_id is None:
+                continue
+            try:
+                by_id[int(raw_id)] = r
+            except (TypeError, ValueError):
+                continue
+
+        saved = []
+        now = datetime.now().isoformat()
+        for ex in executions:
+            issue_id = ex["issue_id"]
+            devin_rec = by_id.get(issue_id)
+            if not devin_rec:
+                # Devin didn't return a record for this issue — fall back to
+                # the rule-based analysis so the UI still has a row, but mark
+                # it so it's clear the Devin path missed this one. Clear the
+                # pending placeholder first so analyze_outcome can write a
+                # fresh record (it returns None when one already exists — the
+                # store.get_optimization short-circuit is inside analyze_outcome).
+                store.clear_optimization(issue_id)
+                fallback = analyze_outcome(issue_id) or {}
+                if fallback:
+                    fallback["optimizer_mode"] = "rule"
+                    fallback["session_id"] = session_id
+                    fallback["session_url"] = session_url
+                    fallback["optimizer_notes"] = (
+                        (fallback.get("optimizer_notes") or "")
+                        + " [Devin optimizer did not return a record for this issue; "
+                          "rule-based fallback used.]"
+                    ).strip()
+                    store.set_optimization(issue_id, fallback)
+                    saved.append(fallback)
+                continue
+
+            scope_plan = store.get_scope_plan(issue_id) or {}
+            planned = store.get_planned(issue_id) or {}
+            record = _normalise_devin_record(
+                devin_rec, ex, scope_plan, planned,
+                session_id=session_id, session_url=session_url, analyzed_at=now,
+            )
+            store.set_optimization(issue_id, record)
+            saved.append(record)
     except Exception:
-        # Clean up pending placeholders so the issues remain eligible for
-        # future optimizer runs (rule-based or Devin-powered). Without this,
-        # a single transient failure would permanently block re-analysis.
+        # Clean up any still-pending placeholders so the affected issues
+        # remain eligible for future optimizer runs (rule-based or
+        # Devin-powered). This covers failures anywhere in Steps 4–6 —
+        # polling, extraction, or persistence. Records already finalised
+        # earlier in the loop are preserved because the cleanup check only
+        # removes entries that still look like the "in progress" placeholder.
         for ex in executions:
             existing = store.get_optimization(ex["issue_id"])
             if existing and existing.get("optimizer_mode") == "devin" and \
@@ -516,40 +568,6 @@ def run_optimizer_with_devin() -> list:
                         "Devin optimizer analysis in progress"):
                 store.clear_optimization(ex["issue_id"])
         raise
-
-    # --- Step 6: persist one enriched record per issue ---
-    by_id = {int(r.get("issue_id")): r for r in records if "issue_id" in r}
-    saved = []
-    now = datetime.now().isoformat()
-    for ex in executions:
-        issue_id = ex["issue_id"]
-        devin_rec = by_id.get(issue_id)
-        if not devin_rec:
-            # Devin didn't return a record for this issue — fall back to the
-            # rule-based analysis so the UI still has a row, but mark it so
-            # it's clear the Devin path missed this one.
-            fallback = analyze_outcome(issue_id) or {}
-            if fallback:
-                fallback["optimizer_mode"] = "rule"
-                fallback["session_id"] = session_id
-                fallback["session_url"] = session_url
-                fallback["optimizer_notes"] = (
-                    (fallback.get("optimizer_notes") or "")
-                    + " [Devin optimizer did not return a record for this issue; "
-                      "rule-based fallback used.]"
-                ).strip()
-                store.set_optimization(issue_id, fallback)
-                saved.append(fallback)
-            continue
-
-        scope_plan = store.get_scope_plan(issue_id) or {}
-        planned = store.get_planned(issue_id) or {}
-        record = _normalise_devin_record(
-            devin_rec, ex, scope_plan, planned,
-            session_id=session_id, session_url=session_url, analyzed_at=now,
-        )
-        store.set_optimization(issue_id, record)
-        saved.append(record)
 
     print(f"[optimizer] Saved {len(saved)} Devin-powered optimization record(s).")
     return saved
