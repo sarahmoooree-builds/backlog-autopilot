@@ -2,9 +2,13 @@ name: Pipeline Scheduler
 
 on:
   schedule:
-    # Every 6 hours — backstop polling: ingest → plan → refresh-status → notify
-    - cron: '0 */6 * * *'
-    # Daily at 06:00 UTC — full planner refresh: ingest → plan --full-refresh → refresh-status → notify
+    # Every 6 hours (skipping 06:00 UTC) — backstop polling.
+    # Pipeline: ingest → plan → refresh-status → notify
+    # The 06:00 slot is intentionally omitted so it doesn't overlap with the
+    # daily full-refresh cron below and trigger duplicate Slack notifications.
+    - cron: '0 0,12,18 * * *'
+    # Daily at 06:00 UTC — full planner refresh.
+    # Pipeline: ingest → plan --full-refresh → refresh-status → notify
     - cron: '0 6 * * *'
   workflow_dispatch:
   repository_dispatch:
