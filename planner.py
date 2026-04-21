@@ -22,9 +22,12 @@ from config import PLANNER_TIMEOUT, POLL_INTERVAL
 from priorities import PlannerStrategy, get_strategy, BALANCED_INTENT
 
 logger = logging.getLogger(__name__)
-# Child logger used by the Devin-powered analysis path so its lines are
-# distinguishable from the rule-based planner path in log output.
-analyse_logger = logger.getChild("analyse")
+# Top-level logger for the Devin-powered analysis path so its lines are
+# distinguishable from the rule-based planner path in log output. Uses the
+# bare name ``"analyse"`` so it matches the logger that ``devin_client``
+# routes to when called with ``label="analyse"`` — otherwise logs from the
+# same stage would split across ``planner.analyse`` and ``analyse``.
+analyse_logger = logging.getLogger("analyse")
 
 # ---------------------------------------------------------------------------
 # Configurable PM weights
