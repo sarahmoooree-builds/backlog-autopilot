@@ -10,11 +10,16 @@ Format:
   "ingested":        { "<issue_id>": IngestedIssue, ... },
   "planned":         { "<issue_id>": PlannedIssue, ... },
   "approvals":       { "<issue_id>": ApprovalRecord, ... },
-  "architect_plans": { "<issue_id>": ArchitectPlan, ... },
+  "architect_plans": { "<issue_id>": ScopePlan, ... },   # section name kept for backwards-compat
   "reviews":         { "<issue_id>": ReviewRecord, ... },
   "executions":      { "<issue_id>": ExecutionSession, ... },
   "optimizations":   { "<issue_id>": OptimizationRecord, ... }
 }
+
+Scope (Stage 3) was previously called "Architect". The JSON section name
+(`architect_plans`) is preserved so existing pipeline_store.json files keep
+working; per-record field names (`architect_status` → `scope_status`,
+`architected_at` → `scoped_at`) are migrated on load.
 """
 
 import json
@@ -126,28 +131,51 @@ def get_approval(issue_id: int) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Stage 3 — Architect
+# Stage 3 — Scope (formerly "Architect")
+#
+# The JSON section name `architect_plans` is retained for backward
+# compatibility; per-record `architect_status`/`architected_at` are
+# normalised to `scope_status`/`scoped_at` on read.
 # ---------------------------------------------------------------------------
 
-def get_architect_plan(issue_id: int) -> Optional[dict]:
-    return get_record("architect_plans", issue_id)
+def _normalise_scope_plan(plan: Optional[dict]) -> Optional[dict]:
+    """Promote legacy `architect_status`/`architected_at` to new keys in memory."""
+    if not plan:
+        return plan
+    if "scope_status" not in plan and "architect_status" in plan:
+        plan["scope_status"] = plan["architect_status"]
+    if "scoped_at" not in plan and "architected_at" in plan:
+        plan["scoped_at"] = plan["architected_at"]
+    return plan
 
 
-def set_architect_plan(issue_id: int, data: dict) -> None:
+def get_scope_plan(issue_id: int) -> Optional[dict]:
+    return _normalise_scope_plan(get_record("architect_plans", issue_id))
+
+
+def set_scope_plan(issue_id: int, data: dict) -> None:
     set_record("architect_plans", issue_id, data)
 
 
-def is_architected(issue_id: int) -> bool:
-    plan = get_architect_plan(issue_id)
-    return bool(plan and plan.get("architect_status") == "complete")
+def is_scoped(issue_id: int) -> bool:
+    plan = get_scope_plan(issue_id)
+    return bool(plan and plan.get("scope_status") == "complete")
 
 
-def clear_architect_plan(issue_id: int) -> None:
+def clear_scope_plan(issue_id: int) -> None:
     delete_record("architect_plans", issue_id)
 
 
-def all_architect_plans() -> list:
-    return all_records("architect_plans")
+def all_scope_plans() -> list:
+    return [_normalise_scope_plan(p) for p in all_records("architect_plans")]
+
+
+# --- Backwards-compatible aliases (deprecated; use scope_* names) ---
+get_architect_plan = get_scope_plan
+set_architect_plan = set_scope_plan
+is_architected = is_scoped
+clear_architect_plan = clear_scope_plan
+all_architect_plans = all_scope_plans
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +183,7 @@ def all_architect_plans() -> list:
 # ---------------------------------------------------------------------------
 
 def is_review_required(issue_id: int) -> bool:
-    plan = get_architect_plan(issue_id)
+    plan = get_scope_plan(issue_id)
     return bool(plan and plan.get("confidence_score", 100) < 75)
 
 
@@ -250,7 +278,7 @@ def all_optimizations() -> list:
 # ---------------------------------------------------------------------------
 
 def confidence_label(score: int) -> tuple:
-    """Convert 0–100 architect confidence score to (label, hex_color)."""
+    """Convert 0–100 scope confidence score to (label, hex_color)."""
     if score >= 75:
         return "High Confidence", "#28a745"
     elif score >= 50:
@@ -266,7 +294,7 @@ def confidence_label(score: int) -> tuple:
 def migrate_legacy_stores() -> None:
     """
     Migrate sessions.json → executions section
-    and triage_store.json → architect_plans section.
+    and triage_store.json → architect_plans section (ScopePlan records).
 
     Safe to call on every app startup — no-op if already migrated.
     Preserves the legacy files; does not delete them.
@@ -297,8 +325,8 @@ def migrate_legacy_stores() -> None:
         except (json.JSONDecodeError, OSError):
             pass
 
-    # Migrate triage_store.json → architect_plans
-    # Maps: next_steps → task_breakdown, adds dependencies/risks/architect_status
+    # Migrate triage_store.json → architect_plans (ScopePlan records)
+    # Maps: next_steps → task_breakdown, status → scope_status
     if os.path.exists(LEGACY_TRIAGE_FILE):
         try:
             with open(LEGACY_TRIAGE_FILE, "r") as f:
@@ -307,11 +335,11 @@ def migrate_legacy_stores() -> None:
                 if issue_id_str not in store["architect_plans"]:
                     status = t.get("status", "complete")
                     if status == "pending":
-                        architect_status = "pending"
+                        scope_status = "pending"
                     elif status == "error":
-                        architect_status = "error"
+                        scope_status = "error"
                     else:
-                        architect_status = "complete"
+                        scope_status = "complete"
 
                     store["architect_plans"][issue_id_str] = {
                         "issue_id": int(issue_id_str),
@@ -326,9 +354,13 @@ def migrate_legacy_stores() -> None:
                         "risks": t.get("risks", []),
                         "session_id": t.get("session_id", "unknown"),
                         "session_url": t.get("session_url", ""),
-                        "architect_status": architect_status,
+                        "scope_status": scope_status,
                         "error": t.get("error"),
-                        "architected_at": t.get("triaged_at", t.get("architected_at", datetime.now().isoformat())),
+                        "scoped_at": t.get(
+                            "triaged_at",
+                            t.get("architected_at",
+                                  t.get("scoped_at", datetime.now().isoformat())),
+                        ),
                     }
                     migrated = True
         except (json.JSONDecodeError, OSError):

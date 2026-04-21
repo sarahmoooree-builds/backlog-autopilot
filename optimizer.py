@@ -53,19 +53,19 @@ def analyze_outcome(issue_id: int) -> Optional[dict]:
     if not execution or execution["status"] not in TERMINAL_STATUSES:
         return None
 
-    architect_plan = store.get_architect_plan(issue_id)
+    scope_plan = store.get_scope_plan(issue_id)
     planned_issue = store.get_planned(issue_id)
 
-    lines_delta = _estimate_lines_delta(execution, architect_plan)
-    files_delta = _estimate_files_delta(execution, architect_plan)
+    lines_delta = _estimate_lines_delta(execution, scope_plan)
+    files_delta = _estimate_files_delta(execution, scope_plan)
     estimation_accuracy = _classify_accuracy(lines_delta, files_delta, execution["status"])
-    pattern_tags = _detect_patterns(execution, architect_plan, planned_issue)
-    notes = _generate_notes(execution, architect_plan, pattern_tags)
+    pattern_tags = _detect_patterns(execution, scope_plan, planned_issue)
+    notes = _generate_notes(execution, scope_plan, pattern_tags)
 
     record = {
         "issue_id": issue_id,
         "planned_score": planned_issue.get("planner_score", {}) if planned_issue else {},
-        "architect_confidence": architect_plan.get("confidence_score", 0) if architect_plan else 0,
+        "scope_confidence": scope_plan.get("confidence_score", 0) if scope_plan else 0,
         "actual_status": execution["status"],
         "actual_pr_count": len(execution.get("pull_requests", [])),
         "estimation_accuracy": estimation_accuracy,
@@ -91,7 +91,7 @@ def get_optimizer_summary() -> dict:
             "total_analyzed": 0,
             "accuracy_breakdown": {"over": 0, "under": 0, "accurate": 0},
             "top_patterns": [],
-            "avg_architect_confidence": 0.0,
+            "avg_scope_confidence": 0.0,
             "completion_rate": 0.0,
             "blocked_rate": 0.0,
             "heuristic_recommendations": [],
@@ -101,7 +101,10 @@ def get_optimizer_summary() -> dict:
     accuracy = Counter(r["estimation_accuracy"] for r in records)
     all_tags = [tag for r in records for tag in r.get("pattern_tags", [])]
     top_patterns = Counter(all_tags).most_common(6)
-    avg_confidence = sum(r["architect_confidence"] for r in records) / total
+    # Prefer new key, fall back to legacy records.
+    avg_confidence = sum(
+        r.get("scope_confidence", r.get("architect_confidence", 0)) for r in records
+    ) / total
     completed = sum(1 for r in records if r["actual_status"] == "Completed")
     blocked = sum(1 for r in records if r["actual_status"] == "Blocked")
 
@@ -113,7 +116,7 @@ def get_optimizer_summary() -> dict:
             "accurate": accuracy.get("accurate", 0),
         },
         "top_patterns": top_patterns,
-        "avg_architect_confidence": round(avg_confidence, 1),
+        "avg_scope_confidence": round(avg_confidence, 1),
         "completion_rate": round(completed / total, 2),
         "blocked_rate": round(blocked / total, 2),
         "heuristic_recommendations": get_heuristic_recommendations(
@@ -127,7 +130,7 @@ def get_optimizer_summary() -> dict:
 # Internal analysis helpers
 # ---------------------------------------------------------------------------
 
-def _estimate_lines_delta(execution: dict, architect_plan: Optional[dict]) -> int:
+def _estimate_lines_delta(execution: dict, scope_plan: Optional[dict]) -> int:
     """
     Proxy for actual lines-changed delta (Devin API does not expose PR diff stats).
 
@@ -149,14 +152,14 @@ def _estimate_lines_delta(execution: dict, architect_plan: Optional[dict]) -> in
     return 0
 
 
-def _estimate_files_delta(execution: dict, architect_plan: Optional[dict]) -> int:
+def _estimate_files_delta(execution: dict, scope_plan: Optional[dict]) -> int:
     """
-    Compare the number of estimated files (from ArchitectPlan) to the number
+    Compare the number of estimated files (from ScopePlan) to the number
     of files recorded at dispatch time in the ExecutionSession.
     """
-    if not architect_plan:
+    if not scope_plan:
         return 0
-    estimated_count = len(architect_plan.get("affected_files", []))
+    estimated_count = len(scope_plan.get("affected_files", []))
     dispatched_count = len(execution.get("estimated_files", []))
     return dispatched_count - estimated_count
 
@@ -174,7 +177,7 @@ def _classify_accuracy(lines_delta: int, files_delta: int, status: str) -> str:
 
 def _detect_patterns(
     execution: dict,
-    architect_plan: Optional[dict],
+    scope_plan: Optional[dict],
     planned_issue: Optional[dict],
 ) -> list:
     """
@@ -183,7 +186,7 @@ def _detect_patterns(
     Tags:
       auth-false-positive   — risk='high' issue that was nevertheless completed
       underestimated-scope  — files_delta > 2
-      confidence-mismatch   — architect confidence ≥ 75 but Blocked
+      confidence-mismatch   — scope confidence ≥ 75 but Blocked
       fast-completion       — Completed with exactly 1 PR
       investigation-leak    — investigation type reached Executor
       low-effort-win        — planner effort ≤ 3 and Completed
@@ -191,8 +194,8 @@ def _detect_patterns(
     tags = []
     status = execution.get("status", "")
     pr_count = len(execution.get("pull_requests", []))
-    confidence = architect_plan.get("confidence_score", 0) if architect_plan else 0
-    files_delta = _estimate_files_delta(execution, architect_plan)
+    confidence = scope_plan.get("confidence_score", 0) if scope_plan else 0
+    files_delta = _estimate_files_delta(execution, scope_plan)
     issue_type = planned_issue.get("issue_type", "") if planned_issue else ""
     planner_effort = (planned_issue or {}).get("planner_score", {}).get("effort", 5)
 
@@ -221,25 +224,25 @@ def _detect_patterns(
 
 def _generate_notes(
     execution: dict,
-    architect_plan: Optional[dict],
+    scope_plan: Optional[dict],
     pattern_tags: list,
 ) -> str:
     """Generate a plain-language optimizer commentary for display in the UI."""
     status = execution.get("status", "unknown")
-    confidence = architect_plan.get("confidence_score", 0) if architect_plan else 0
+    confidence = scope_plan.get("confidence_score", 0) if scope_plan else 0
     pr_count = len(execution.get("pull_requests", []))
 
     parts = []
 
     if "fast-completion" in pattern_tags:
-        parts.append(f"Completed cleanly with 1 PR — Architect estimate was accurate.")
+        parts.append("Completed cleanly with 1 PR — Scope estimate was accurate.")
     elif status == "Completed":
         parts.append(f"Completed with {pr_count} PR(s).")
 
     if "confidence-mismatch" in pattern_tags:
         parts.append(
-            f"High architect confidence ({confidence}/100) but session was blocked — "
-            f"review the Architect plan for hidden complexity."
+            f"High Scope confidence ({confidence}/100) but session was blocked — "
+            f"review the Scope plan for hidden complexity."
         )
 
     if "underestimated-scope" in pattern_tags:
@@ -301,9 +304,9 @@ def get_heuristic_recommendations(
 
     if pattern_dict.get("confidence-mismatch", 0) >= 2:
         recs.append(
-            f"Architect confidence score mismatch on {pattern_dict['confidence-mismatch']} session(s). "
-            f"The Architect may be overestimating confidence on certain issue types — "
-            f"review the ARCHITECT_PROMPT constraints around edge-case assessment."
+            f"Scope confidence mismatch on {pattern_dict['confidence-mismatch']} session(s). "
+            f"The Scope stage may be overestimating confidence on certain issue types — "
+            f"review the SCOPE_PROMPT constraints around edge-case assessment."
         )
 
     if pattern_dict.get("low-effort-win", 0) >= 2:

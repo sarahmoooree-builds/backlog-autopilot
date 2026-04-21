@@ -1,15 +1,15 @@
 """
 prompts.py — Prompt templates for Devin-powered pipeline stages
 
-Stage 3 (Architect): ARCHITECT_PROMPT — produces a technical implementation plan
-Stage 4 (Executor):  EXECUTION_PROMPT — implements the plan and opens a PR
+Stage 3 (Scope):    SCOPE_PROMPT — produces a technical implementation plan
+Stage 4 (Executor): EXECUTION_PROMPT — implements the plan and opens a PR
 
 Stages 1 and 2 (Ingest, Planner) are rule-based — no Devin prompts needed.
 Stage 5 (Optimizer) reads stored data — no Devin prompts needed.
 
 Usage:
-    from prompts import ARCHITECT_PROMPT, EXECUTION_PROMPT
-    prompt = ARCHITECT_PROMPT.format(issue_id=..., title=..., ...)
+    from prompts import SCOPE_PROMPT, EXECUTION_PROMPT
+    prompt = SCOPE_PROMPT.format(issue_id=..., title=..., ...)
 """
 
 TARGET_REPO = "sarahmoooree-builds/finserv-platform"
@@ -152,7 +152,7 @@ How long has it been open? How many comments suggest user frustration?
 
    - **effort**: How hard is this to implement? (10 = hardest, 1 = trivial)
      Base this on complexity and scope. A high-effort score means more work for the \
-Architect and Executor — factor this into your recommendation.
+Scope and Executor stages — factor this into your recommendation.
 
    - **confidence**: How likely is this to succeed as an autonomous AI task?
      10 = clear bug, narrow scope, obvious fix. 1 = vague, investigation-style, \
@@ -347,7 +347,7 @@ Rules:
 
 
 # ---------------------------------------------------------------------------
-# Stage 3: Architect Prompt
+# Stage 3: Scope Prompt
 #
 # Instructs Devin to read the codebase and produce a build-ready technical plan.
 # Does NOT write code. Does NOT open a PR.
@@ -358,8 +358,8 @@ Rules:
 #   implementation_options
 # ---------------------------------------------------------------------------
 
-ARCHITECT_PROMPT = """\
-You are a senior software architect performing technical planning for an approved GitHub issue.
+SCOPE_PROMPT = """\
+You are a senior software architect producing a technical scope plan for an approved GitHub issue.
 This issue has been reviewed and approved for autonomous implementation.
 Your job is to read the codebase and produce a precise, build-ready technical plan.
 You do NOT write code or open pull requests.
@@ -422,34 +422,34 @@ Rules:
 # ---------------------------------------------------------------------------
 # Stage 4: Executor Prompt
 #
-# Instructs Devin to implement the Architect's plan using the two-subagent
+# Instructs Devin to implement the Scope plan using the two-subagent
 # pipeline (issue-explorer → issue-fixer).
 #
 # Format params:
 #   issue_id, title, description, labels,
 #   issue_type, complexity, scope, summary,
 #   root_cause, affected_files, task_breakdown,
-#   architect_confidence, risks
+#   scope_confidence, risks
 # ---------------------------------------------------------------------------
 
 EXECUTION_PROMPT = """\
 You are an autonomous software engineering agent implementing an approved fix.
-Follow the Architect Plan below exactly. Do not invent strategy or prioritisation.
+Follow the Scope Plan below exactly. Do not invent strategy or prioritisation.
 
 ## Subagent Instructions
 
 Use the two-agent pipeline defined in `.devin/agents/`:
 
 1. **Spawn `issue-explorer` as a background subagent.** Give it the issue details and the
-   Architect Plan below. Ask it to produce an investigation report confirming the root cause
+   Scope Plan below. Ask it to produce an investigation report confirming the root cause
    and flagging any divergence from the plan.
 
-2. **Wait for the explorer to finish.** If the explorer's findings contradict the Architect Plan
+2. **Wait for the explorer to finish.** If the explorer's findings contradict the Scope Plan
    significantly (different root cause, additional affected files not listed), STOP and report
    the discrepancy — do not proceed with an incorrect plan.
 
 3. **Spawn `issue-fixer` as a foreground subagent.** Pass it the explorer's report AND the
-   Architect Plan. Instruct it to implement exactly the task breakdown in order, run tests,
+   Scope Plan. Instruct it to implement exactly the task breakdown in order, run tests,
    and open a PR.
 
 ## Issue Details
@@ -465,7 +465,7 @@ Use the two-agent pipeline defined in `.devin/agents/`:
 
 **Summary:** {summary}
 
-## Architect Plan
+## Scope Plan
 
 **Root Cause:**
 {root_cause}
@@ -476,7 +476,7 @@ Use the two-agent pipeline defined in `.devin/agents/`:
 **Task Breakdown (implement in this order):**
 {task_breakdown}
 
-**Architect Confidence:** {architect_confidence}/100
+**Scope Confidence:** {scope_confidence}/100
 
 **Risks to Watch:**
 {risks}
