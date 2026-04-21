@@ -566,10 +566,15 @@ with tab_pipeline:
             for i in auto_recommended:
                 if i["id"] in selectable_ids:
                     st.session_state.selected_ids.add(i["id"])
+                    # Keep the checkbox widget state in sync so the UI reflects
+                    # the programmatic selection on the next render.
+                    st.session_state[f"select_{i['id']}"] = True
             st.rerun()
 
     with a2:
         if st.button("Clear selection", disabled=not currently_selected):
+            for iid in list(st.session_state.selected_ids):
+                st.session_state[f"select_{iid}"] = False
             st.session_state.selected_ids.clear()
             st.rerun()
 
@@ -580,7 +585,7 @@ with tab_pipeline:
             if i["id"] in st.session_state.selected_ids
             and derive_status(i["id"]) == "not_scoped"
         ]
-        scope_label = f"Scope selected issues ({len(to_scope)})" if to_scope else "Scope selected issues"
+        scope_label = "Scope selected issues"
         # Scope the action-row styling via the button's own st-key class so
         # it doesn't leak into any other 4-column row on the page (the goal
         # selector at app.py:424 is also st.columns(4); :nth-child(3) used
@@ -686,10 +691,16 @@ with tab_pipeline:
                     label_visibility="collapsed",
                 )
             else:
+                # Widget state (st.session_state[key]) is the source of truth
+                # once the widget has rendered — Streamlit ignores `value=` on
+                # subsequent renders when a key is set. Seed the widget state
+                # from `selected_ids` on first render, then read back after.
+                key = f"select_{issue_id}"
+                if key not in st.session_state:
+                    st.session_state[key] = issue_id in st.session_state.selected_ids
                 checked = st.checkbox(
                     "Select",
-                    key=f"select_{issue_id}",
-                    value=issue_id in st.session_state.selected_ids,
+                    key=key,
                     label_visibility="collapsed",
                 )
                 if checked:
