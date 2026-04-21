@@ -729,8 +729,10 @@ def plan_issues_with_devin(ingested: list) -> dict:
             "planned_at": now,
         })
 
-    # Sort by total_score descending (Devin may have already ranked, but ensure it)
-    planned.sort(key=lambda x: x["planner_score"]["total_score"], reverse=True)
+    # Canonical ordering: (tier ascending, -score_within_tier descending);
+    # also reassigns priority_rank contiguously so the Devin path matches
+    # the rule-based path and rescore_with_strategy.
+    reorder_by_tier(planned)
 
     logger.info("Done — %d issues prioritised by Devin.", len(planned))
     return {
