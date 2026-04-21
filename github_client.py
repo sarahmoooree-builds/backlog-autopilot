@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta
 
 import requests
 
-from config import GITHUB_TOKEN, TARGET_REPO
+from config import GITHUB_TOKEN, SESSION, TARGET_REPO
 
 API_ROOT = "https://api.github.com"
 BASE_URL = f"{API_ROOT}/repos/{TARGET_REPO}"
@@ -41,7 +41,7 @@ def _paginate(url, headers=None, params=None):
     next_params = params
 
     while next_url:
-        response = requests.get(next_url, headers=headers, params=next_params, timeout=30)
+        response = SESSION.get(next_url, headers=headers, params=next_params, timeout=30)
         if not response.ok:
             raise RuntimeError(
                 f"GitHub API request failed: {response.status_code} "

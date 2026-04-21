@@ -17,6 +17,7 @@ Output: list[OptimizationRecord]
 """
 
 import json
+import logging
 import os
 import time
 import requests
@@ -27,8 +28,11 @@ from collections import Counter
 from dotenv import load_dotenv
 
 import store
+from config import SESSION
 from planner import migrate_legacy_score
 from prompts import OPTIMIZER_PROMPT
+
+logger = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = {"Completed", "Blocked", "Awaiting Review"}
 
@@ -427,7 +431,7 @@ def run_optimizer_with_devin() -> list:
         and not store.get_optimization(e["issue_id"])
     ]
     if not executions:
-        print("[optimizer] No pending terminal executions — nothing to analyse.")
+        logger.info("No pending terminal executions — nothing to analyse.")
         return []
 
     scope_plans = [
@@ -444,8 +448,13 @@ def run_optimizer_with_devin() -> list:
     }
 
     # --- Step 2: create the Devin session ---
-    print(f"[optimizer] Creating Devin session for {len(executions)} terminal execution(s)…")
+    logger.info(
+        "Creating Devin session for %d terminal execution(s)…", len(executions),
+    )
     try:
+        # See devin_client.create_session — POST uses bare requests.post to
+        # avoid urllib3 retrying non-idempotent session creation on
+        # connection errors (allowed_methods=["GET"] is not honoured there).
         response = requests.post(
             f"{DEVIN_API_BASE}/sessions",
             headers=headers,
@@ -470,7 +479,7 @@ def run_optimizer_with_devin() -> list:
     if not session_id:
         raise RuntimeError("No session_id returned from Devin API")
 
-    print(f"[optimizer] Session created: {session_url}")
+    logger.info("Session created: %s", session_url)
 
     # --- Step 3: mark each issue as pending so the UI can show progress ---
     for ex in executions:
@@ -491,16 +500,20 @@ def run_optimizer_with_devin() -> list:
         final_status = (result.get("status") or "").lower()
         final_detail = (result.get("status_detail") or "").lower()
         has_structured_output = bool(result.get("structured_output"))
-        print(
-            f"[optimizer] Session terminal state: status={final_status!r} "
-            f"detail={final_detail!r} structured_output_present={has_structured_output}"
+        logger.info(
+            "Session terminal state: status=%r detail=%r "
+            "structured_output_present=%s",
+            final_status, final_detail, has_structured_output,
         )
 
         # --- Step 5: pull messages + extract the JSON array ---
         messages = _fetch_messages(session_id, headers)
-        print(
-            f"[optimizer] Fetched {len(messages)} message(s) "
-            f"(devin-authored: {sum(1 for m in messages if (m.get('source') or '').lower() == 'devin')})"
+        devin_count = sum(
+            1 for m in messages if (m.get("source") or "").lower() == "devin"
+        )
+        logger.info(
+            "Fetched %d message(s) (devin-authored: %d)",
+            len(messages), devin_count,
         )
 
         records = _extract_optimizer_json(result, messages)
@@ -574,7 +587,9 @@ def run_optimizer_with_devin() -> list:
                 store.clear_optimization(ex["issue_id"])
         raise
 
-    print(f"[optimizer] Saved {len(saved)} Devin-powered optimization record(s).")
+    logger.info(
+        "Saved %d Devin-powered optimization record(s).", len(saved),
+    )
     return saved
 
 
@@ -769,7 +784,7 @@ def _poll_until_done(session_id: str, headers: dict):
     while time.time() < deadline:
         attempt += 1
         try:
-            response = requests.get(
+            response = SESSION.get(
                 f"{DEVIN_API_BASE}/sessions/{session_id}",
                 headers=headers,
                 timeout=15,
@@ -778,24 +793,32 @@ def _poll_until_done(session_id: str, headers: dict):
                 session = response.json()
                 status = (session.get("status") or "unknown").lower()
                 detail = (session.get("status_detail") or "").lower()
-                print(f"[optimizer] Poll #{attempt}: status={status!r} detail={detail!r}")
+                logger.debug(
+                    "Poll #%d: status=%r detail=%r", attempt, status, detail,
+                )
                 if status not in _NON_TERMINAL_STATUSES:
-                    print(f"[optimizer] Poll #{attempt}: terminal status ({status!r})")
+                    logger.info(
+                        "Poll #%d: terminal status (%r)", attempt, status,
+                    )
                     return session
                 if detail in _WORK_PRODUCT_READY_DETAILS:
-                    print(
-                        f"[optimizer] Poll #{attempt}: Devin work product ready "
-                        f"(status={status!r}, detail={detail!r})"
+                    logger.info(
+                        "Poll #%d: Devin work product ready (status=%r, detail=%r)",
+                        attempt, status, detail,
                     )
                     return session
             else:
-                print(f"[optimizer] Poll #{attempt}: HTTP {response.status_code}")
+                logger.warning(
+                    "Poll #%d: HTTP %d", attempt, response.status_code,
+                )
         except requests.exceptions.RequestException as e:
-            print(f"[optimizer] Poll #{attempt}: request error — {e}")
+            logger.warning("Poll #%d: request error — %s", attempt, e)
 
         time.sleep(POLL_INTERVAL)
 
-    print(f"[optimizer] Timed out after {OPTIMIZER_TIMEOUT}s ({attempt} polls)")
+    logger.warning(
+        "Timed out after %ds (%d polls)", OPTIMIZER_TIMEOUT, attempt,
+    )
     return None
 
 
@@ -814,14 +837,14 @@ def _fetch_messages(session_id: str, headers: dict) -> list:
         if cursor:
             params["after"] = cursor
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=20)
+            response = SESSION.get(url, headers=headers, params=params, timeout=20)
         except requests.exceptions.RequestException as e:
-            print(f"[optimizer] _fetch_messages: request error — {e}")
+            logger.warning("_fetch_messages: request error — %s", e)
             break
         if response.status_code != 200:
-            print(
-                f"[optimizer] _fetch_messages: HTTP {response.status_code} "
-                f"— {response.text[:200]}"
+            logger.warning(
+                "_fetch_messages: HTTP %d — %s",
+                response.status_code, response.text[:200],
             )
             break
         payload = response.json()

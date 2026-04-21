@@ -143,41 +143,67 @@ them for autonomous resolution, with clear reasoning that a PM can read and act 
 
 For each issue, produce the following:
 
-1. **Score on four dimensions (0–10 integers each):**
+1. **Score on six dimensions (0–10 integers each). Higher = more of the dimension \
+— no hidden inversions.**
 
-   - **user_impact**: How many users are affected, and how severely?
-     Consider: is this blocking a workflow? Is it intermittent or constant? \
-How long has it been open? How many comments suggest user frustration?
-     10 = widespread, blocking issue. 1 = cosmetic, affects almost no one.
+   - **severity**: How bad is the problem when it happens?
+     10 = data loss, outage, blocking crash. 1 = cosmetic or rare nuisance.
 
-   - **business_impact**: Does this affect revenue, compliance, SLA, or customer trust?
-     10 = direct revenue or compliance risk. 1 = internal tooling with no customer exposure.
+   - **reach**: How many users or customers are affected?
+     10 = all users or a widespread cohort. 1 = one internal user or a rare edge case.
+     Consider: comment count, "all users"/"widespread" signals, customer-facing labels, age.
 
-   - **effort**: How hard is this to implement? (10 = hardest, 1 = trivial)
-     Base this on complexity and scope. A high-effort score means more work for the \
-Scope and Executor stages — factor this into your recommendation.
+   - **business_value**: Does fixing this protect revenue, compliance, SLA, or customer trust?
+     10 = direct revenue/compliance/SLA risk. 1 = internal tooling with no customer exposure.
+
+   - **ease**: How easy is this to implement? (10 = trivial, 1 = hardest — higher is easier)
+     Base on complexity and scope. Low-complexity + narrow-scope = high ease. \
+High-complexity + broad-scope = low ease.
 
    - **confidence**: How likely is this to succeed as an autonomous AI task?
      10 = clear bug, narrow scope, obvious fix. 1 = vague, investigation-style, \
-requires human judgment or access to undocumented context.
+requires human judgment or undocumented context.
 
-2. **Compute total_score** (float):
-   `user_impact * 0.35 + business_impact * 0.25 + (10 - effort) * 0.20 + confidence * 0.20`
+   - **urgency**: How much time pressure is on this?
+     10 = SLA-breaching, aged 90+ days with active discussion, or explicit critical label. \
+1 = fresh issue with no time pressure.
 
-3. **Recommend or not:**
-   `recommended = total_score >= 6.0 AND risk != "high" AND issue_type != "investigation"`
+2. **Assign a tier (1–4) and write a one-sentence tier_reason:**
 
-4. **Write recommendation_reason** — 1-2 sentences explaining why this issue is or is not \
-recommended. Be specific: mention what makes it high/low impact or easy/hard. \
+   - **Tier 1 (Critical)**: Severe customer-facing bugs, compliance or SLA risk, or \
+data-loss scenarios. Usually high severity AND (high reach OR high urgency).
+   - **Tier 2 (High)**: Important work but not an emergency — established bugs with \
+moderate reach, or clearly business-relevant features.
+   - **Tier 3 (Normal)**: Standard backlog items with reasonable confidence.
+   - **Tier 4 (Deferred)**: Investigation-style work, low confidence, duplicates, or \
+items with no business urgency.
+
+3. **Compute score_within_tier** (float, 2 decimal places) — the weighted sum used to \
+order issues inside a tier. Use the balanced weights:
+   `score_within_tier = severity*0.25 + reach*0.20 + business_value*0.20 + ease*0.15 + confidence*0.10 + urgency*0.10`
+
+4. **Compute total_score** (float, 2 decimal places) — kept for backward compatibility:
+   `total_score = (4 - tier) * 2.5 + score_within_tier * 0.25`
+
+5. **Recommend or not:**
+   - Tier 1 or 2 with confidence ≥ 3 AND risk != "high" AND issue_type != "investigation" → recommended
+   - Tier 3 only if ease ≥ 5 AND confidence ≥ 5 → recommended
+   - Tier 4 → never recommended
+   - risk == "high" OR issue_type == "investigation" → never recommended, regardless of tier
+
+6. **Write recommendation_reason** — 1-2 sentences explaining why this issue is or is not \
+recommended. Be specific about what makes it high/low impact, easy/hard, or uncertain. \
 This is the sentence a PM reads to decide whether to approve.
 
-5. **Assign priority_rank** — rank all issues 1 to N by total_score descending (1 = highest \
-priority). Rank non-recommended issues after recommended ones.
+7. **Assign priority_rank** — rank all issues 1 to N by (tier ascending, then \
+score_within_tier descending). Rank 1 = Tier 1 with highest score_within_tier. \
+Non-recommended issues should still be ranked — the rank reflects tier order, not \
+recommendation status. No ties, no gaps.
 
-6. **List implementation_options** — for recommended issues only, 1-3 plain-English \
+8. **List implementation_options** — for recommended issues only, 1-3 plain-English \
 approaches a developer might take (no code). For non-recommended, use [].
 
-7. **Write a scope_summary** — 1 sentence describing what this work touches and what would \
+9. **Write a scope_summary** — 1 sentence describing what this work touches and what would \
 need to change. Example: "Touches the email validation layer in the auth service; \
 no downstream dependencies."
 
@@ -189,10 +215,15 @@ Respond with ONLY a JSON array, one object per issue:
 [
   {{
     "id": <original issue id>,
-    "user_impact": <0-10>,
-    "business_impact": <0-10>,
-    "effort": <0-10>,
+    "severity": <0-10>,
+    "reach": <0-10>,
+    "business_value": <0-10>,
+    "ease": <0-10>,
     "confidence": <0-10>,
+    "urgency": <0-10>,
+    "tier": <1-4>,
+    "tier_reason": "<1 sentence>",
+    "score_within_tier": <float>,
     "total_score": <float>,
     "recommended": <bool>,
     "recommendation_reason": "<1-2 sentences>",
@@ -207,7 +238,9 @@ Rules:
 - Output raw JSON only — no markdown fences, no commentary
 - Every issue in the input must appear in the output
 - Rank all N issues from 1 to N — no ties, no gaps
-- Scores must be integers 0–10; total_score is a float rounded to 2 decimal places
+- All six dimension scores must be integers 0–10 (no inversions)
+- `score_within_tier` and `total_score` are floats rounded to 2 decimal places
+- `tier` is an integer 1–4
 """
 
 
@@ -272,39 +305,67 @@ issue in the batch, set `duplicate_of` to that issue's id. Otherwise null.
 
 ### Part 2 — Score and Prioritise
 
-Score each issue on four dimensions (0–10 integers each):
+Score each issue on six dimensions (0–10 integers each). All dimensions are \
+"higher = more of the dimension" — no hidden inversions.
 
-8. **user_impact** — How many users are affected, and how severely?
-   10 = widespread, blocking issue. 1 = cosmetic, affects almost no one.
-   Consider: issue age, comment count, type, priority labels.
+8. **severity** — How bad is the problem when it happens?
+   10 = data loss, outage, blocking crash. 1 = cosmetic or rare nuisance.
 
-9. **business_impact** — Does this affect revenue, compliance, SLA, or customer trust?
-   10 = direct revenue or compliance risk. 1 = internal tooling, no customer exposure.
+9. **reach** — How many users or customers are affected?
+   10 = all users or a widespread cohort. 1 = one internal user or a rare edge case.
+   Consider: comment count, "all users"/"widespread" signals, customer-facing labels, age.
 
-10. **effort** — How hard is this to implement? (10 = hardest, 1 = trivial)
-    Base on complexity and scope. High effort = more work for the engineering pipeline.
+10. **business_value** — Does fixing this protect revenue, compliance, SLA, or customer trust?
+    10 = direct revenue/compliance/SLA risk. 1 = internal tooling, no customer exposure.
 
-11. **confidence** — How likely is autonomous AI resolution to succeed?
+11. **ease** — How easy is this to implement? (10 = trivial, 1 = hardest — higher is easier)
+    Base on complexity and scope. Low-complexity + narrow-scope = high ease. \
+High-complexity + broad-scope = low ease.
+
+12. **confidence** — How likely is autonomous AI resolution to succeed?
     10 = clear bug, narrow scope, obvious fix path. 1 = vague, investigation-style, \
 requires human judgment.
 
-12. **Compute total_score** (float, 2 decimal places):
-    `total_score = user_impact * 0.35 + business_impact * 0.25 + (10 - effort) * 0.20 + confidence * 0.20`
+13. **urgency** — How much time pressure is on this?
+    10 = SLA-breaching, aged 90+ days with active discussion, or explicit critical label. \
+1 = fresh issue with no time pressure.
 
-13. **Recommend or not:**
-    `recommended = total_score >= 6.0 AND risk != "high" AND issue_type != "investigation"`
+14. **Assign a tier (1–4) and write a one-sentence tier_reason:**
 
-14. **Write recommendation_reason** — 1-2 sentences explaining why recommended or not. \
-Be specific about what makes it high/low impact or easy/hard. This is what a PM reads to \
-decide whether to approve.
+    - **Tier 1 (Critical)**: Severe customer-facing bugs, compliance or SLA risk, or \
+data-loss scenarios. Usually high severity AND (high reach OR high urgency).
+    - **Tier 2 (High)**: Important work but not an emergency — established bugs with \
+moderate reach, or clearly business-relevant features.
+    - **Tier 3 (Normal)**: Standard backlog items with reasonable confidence.
+    - **Tier 4 (Deferred)**: Investigation-style work, low confidence, duplicates, or \
+items with no business urgency.
 
-15. **Assign priority_rank** — rank all issues 1 to N by total_score descending (1 = highest). \
-Rank non-recommended issues after recommended ones. No ties, no gaps.
+15. **Compute score_within_tier** (float, 2 decimal places) — the weighted sum used to \
+order issues inside a tier. Use the balanced weights:
+    `score_within_tier = severity*0.25 + reach*0.20 + business_value*0.20 + ease*0.15 + confidence*0.10 + urgency*0.10`
 
-16. **List implementation_options** — for recommended issues only, 1-3 plain-English \
+16. **Compute total_score** (float, 2 decimal places) — kept for backward compatibility:
+    `total_score = (4 - tier) * 2.5 + score_within_tier * 0.25`
+
+17. **Recommend or not:**
+    - Tier 1 or 2 with confidence ≥ 3 AND risk != "high" AND issue_type != "investigation" → recommended
+    - Tier 3 only if ease ≥ 5 AND confidence ≥ 5 → recommended
+    - Tier 4 → never recommended
+    - risk == "high" OR issue_type == "investigation" → never recommended, regardless of tier
+
+18. **Write recommendation_reason** — 1-2 sentences explaining why recommended or not. \
+Be specific about what makes it high/low impact, easy/hard, or uncertain. This is what a \
+PM reads to decide whether to approve.
+
+19. **Assign priority_rank** — rank all issues 1 to N by (tier ascending, then \
+score_within_tier descending). Rank 1 = Tier 1 with highest score_within_tier. \
+Non-recommended issues should still be ranked — rank reflects tier order, not \
+recommendation status. No ties, no gaps.
+
+20. **List implementation_options** — for recommended issues only, 1-3 plain-English \
 approaches (no code). For non-recommended, use [].
 
-17. **Write scope_summary** — 1 sentence describing what this work touches and what would \
+21. **Write scope_summary** — 1 sentence describing what this work touches and what would \
 need to change.
 
 ## Required output
@@ -326,10 +387,15 @@ Respond with ONLY a JSON array, one object per issue, in priority_rank order (ra
     "scope": "<narrow|broad>",
     "risk": "<low|high>",
     "duplicate_of": <issue id or null>,
-    "user_impact": <0-10>,
-    "business_impact": <0-10>,
-    "effort": <0-10>,
+    "severity": <0-10>,
+    "reach": <0-10>,
+    "business_value": <0-10>,
+    "ease": <0-10>,
     "confidence": <0-10>,
+    "urgency": <0-10>,
+    "tier": <1-4>,
+    "tier_reason": "<1 sentence>",
+    "score_within_tier": <float>,
     "total_score": <float>,
     "recommended": <bool>,
     "recommendation_reason": "<1-2 sentences>",
@@ -345,7 +411,9 @@ Rules:
 - Preserve the original `id`, `description`, `age_days`, and `comments_count` exactly
 - Every issue in the input must appear in the output
 - Rank all N issues from 1 to N — no ties, no gaps
-- Scores must be integers 0–10; total_score is a float rounded to 2 decimal places
+- All six dimension scores must be integers 0–10 (no inversions)
+- `score_within_tier` and `total_score` are floats rounded to 2 decimal places
+- `tier` is an integer 1–4
 """
 
 
@@ -588,7 +656,7 @@ this field must be null.
    - `fast-completion` — Completed with exactly 1 PR and `lines_delta` within ±20.
    - `confidence-mismatch` — `scope_plan.confidence_score >= 75` but session is Blocked.
    - `underestimated-scope` — `files_delta > 2` or `lines_delta > 50`.
-   - `low-effort-win` — planner effort score ≤ 3 and session is Completed.
+   - `low-effort-win` — planner ease score ≥ 7 (i.e. low effort) and session is Completed.
    - `investigation-leak` — `planned_issue.issue_type == "investigation"` that reached the \
 executor.
    - `auth-false-positive` — `planned_issue.risk == "high"` that nevertheless Completed.
@@ -618,9 +686,10 @@ NOT add markdown fences or commentary.
     "files_delta": <int>,
     "estimation_accuracy": "<over|under|accurate>",
     "scope_confidence": <int 0-100>,
-    "planned_score": {{ "user_impact": <int>, "business_impact": <int>, "effort": <int>, \
-"confidence": <int>, "total_score": <float>, "recommended": <bool>, \
-"recommendation_reason": "<string>", "priority_rank": <int> }},
+    "planned_score": {{ "severity": <int>, "reach": <int>, "business_value": <int>, \
+"ease": <int>, "confidence": <int>, "urgency": <int>, "tier": <int>, \
+"tier_reason": "<string>", "score_within_tier": <float>, "total_score": <float>, \
+"recommended": <bool>, "recommendation_reason": "<string>", "priority_rank": <int> }},
     "pattern_tags": ["<tag from fixed vocabulary>", ...],
     "failure_root_cause": "<=240 chars, or null for non-Blocked",
     "optimizer_notes": "<1-3 sentences of retrospective commentary — cite concrete files, \

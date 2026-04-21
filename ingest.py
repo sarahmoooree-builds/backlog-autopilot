@@ -8,12 +8,15 @@ Output: list[IngestedIssue]
 """
 
 import json
+import logging
 import requests
 from datetime import datetime
 from typing import Optional
 
 import devin_client
 from config import INGEST_TIMEOUT, POLL_INTERVAL
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Classification keyword lists
@@ -215,7 +218,7 @@ def ingest_issues_with_devin(raw_issues: list) -> dict:
         issues_json=issues_json,
     )
 
-    print(f"[ingest] Creating Devin ingest session for {len(raw_issues)} issues…")
+    logger.info("Creating Devin ingest session for %d issues…", len(raw_issues))
     try:
         created = devin_client.create_session(prompt, bypass_approval=True)
     except requests.exceptions.RequestException as e:
@@ -227,7 +230,7 @@ def ingest_issues_with_devin(raw_issues: list) -> dict:
 
     session_id  = created["session_id"]
     session_url = created["session_url"]
-    print(f"[ingest] Session created: {session_url}")
+    logger.info("Session created: %s", session_url)
 
     result = devin_client.poll_until_done(
         session_id,
@@ -262,7 +265,7 @@ def ingest_issues_with_devin(raw_issues: list) -> dict:
             "ingested_at": now,
         })
 
-    print(f"[ingest] Done — {len(ingested)} issues normalised by Devin.")
+    logger.info("Done — %d issues normalised by Devin.", len(ingested))
     return {
         "status": "complete",
         "session_id": session_id,

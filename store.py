@@ -23,6 +23,15 @@ import sqlite3
 from datetime import datetime
 from typing import Optional
 
+from validators import (
+    ExecutionSessionModel,
+    IngestedIssueModel,
+    OptimizationRecordModel,
+    PlannedIssueModel,
+    ScopePlanModel,
+    validate_record,
+)
+
 STORE_FILE = os.path.join(os.path.dirname(__file__), "pipeline_store.json")
 STORE_DB = os.path.join(os.path.dirname(__file__), "pipeline_store.db")
 LEGACY_SESSIONS_FILE = os.path.join(os.path.dirname(__file__), "sessions.json")
@@ -163,6 +172,7 @@ def get_ingested(issue_id: int) -> Optional[dict]:
 
 
 def set_ingested(issue_id: int, data: dict) -> None:
+    data = validate_record(data, IngestedIssueModel, f"ingested:{issue_id}")
     set_record("ingested", issue_id, data)
 
 
@@ -175,6 +185,7 @@ def get_planned(issue_id: int) -> Optional[dict]:
 
 
 def set_planned(issue_id: int, data: dict) -> None:
+    data = validate_record(data, PlannedIssueModel, f"planned:{issue_id}")
     set_record("planned", issue_id, data)
 
 
@@ -223,6 +234,7 @@ def get_scope_plan(issue_id: int) -> Optional[dict]:
 
 
 def set_scope_plan(issue_id: int, data: dict) -> None:
+    data = validate_record(data, ScopePlanModel, f"scope_plan:{issue_id}")
     set_record("architect_plans", issue_id, data)
 
 
@@ -277,6 +289,7 @@ def get_execution(issue_id: int) -> Optional[dict]:
 
 
 def set_execution(issue_id: int, data: dict) -> None:
+    data = validate_record(data, ExecutionSessionModel, f"execution:{issue_id}")
     set_record("executions", issue_id, data)
 
 
@@ -345,6 +358,7 @@ def get_optimization(issue_id: int) -> Optional[dict]:
 
 
 def set_optimization(issue_id: int, data: dict) -> None:
+    data = validate_record(data, OptimizationRecordModel, f"optimization:{issue_id}")
     set_record("optimizations", issue_id, data)
 
 
