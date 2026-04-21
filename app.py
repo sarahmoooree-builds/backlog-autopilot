@@ -349,6 +349,12 @@ with tab_pipeline:
         st.session_state.prioritization_intent = parse_prioritization_intent(text)
         load_and_plan.clear()
 
+    def _reset_prioritization():
+        st.session_state.prioritization_input = ""
+        st.session_state.prioritization_text = ""
+        st.session_state.prioritization_intent = BALANCED_INTENT
+        load_and_plan.clear()
+
     with st.container(border=True):
         st.subheader("What are you prioritizing?")
         st.caption(
@@ -393,15 +399,16 @@ with tab_pipeline:
             )
 
         if has_text:
-            if st.button("Reset to balanced", key="reset_prioritization"):
-                # Clear the widget key as well — Streamlit ignores `value=` once a
-                # widget key lives in session_state, so we must reset it explicitly
-                # or the stale text persists through the rerun.
-                st.session_state.prioritization_input = ""
-                st.session_state.prioritization_text = ""
-                st.session_state.prioritization_intent = BALANCED_INTENT
-                load_and_plan.clear()
-                st.rerun()
+            # Reset must happen in an on_click callback: Streamlit forbids
+            # writing to `st.session_state.prioritization_input` after the
+            # text_input widget has been instantiated on the current run.
+            # Callbacks fire before the next render, so we can safely clear
+            # the widget key there.
+            st.button(
+                "Reset to balanced",
+                key="reset_prioritization",
+                on_click=_reset_prioritization,
+            )
 
     st.markdown("")
     st.divider()
@@ -786,7 +793,7 @@ with tab_pipeline:
             render_issue_row(issue, recommended_group=True)
     else:
         st.caption("No issues currently scored as automation-ready. "
-                   "Adjust the Planner weights in the sidebar to see more.")
+                   "Try a different prioritization goal above to see more.")
 
     # --- Clear grouped divider ---
     st.markdown("<div class='ba-section-divider'></div>", unsafe_allow_html=True)
