@@ -125,7 +125,7 @@ def architect_issue(planned_issue: dict) -> dict:
     # Attempt extraction even when the session is still 'running' +
     # 'waiting_for_user' / 'finished' — Devin often emits the full JSON plan
     # and then waits for further instructions rather than fully exiting.
-    plan_data = _extract_architect_json(result, messages)
+    plan_data, plan_source = _extract_architect_json(result, messages)
 
     if not plan_data:
         suspended_note = (
@@ -155,8 +155,7 @@ def architect_issue(planned_issue: dict) -> dict:
 
     print(
         f"[architect] Parsed architect JSON for issue #{issue_id} "
-        f"(source={'structured_output' if has_structured_output else 'messages'}, "
-        f"status={final_status!r}, detail={final_detail!r})"
+        f"(source={plan_source!r}, status={final_status!r}, detail={final_detail!r})"
     )
 
     architect_plan = {
@@ -356,7 +355,7 @@ _REQUIRED_PLAN_FIELDS = frozenset({
 })
 
 
-def _extract_architect_json(session_data: dict, messages: list | None = None):
+def _extract_architect_json(session_data: dict, messages=None):
     """
     Extract the structured architect JSON from the Devin session output.
 
@@ -368,13 +367,15 @@ def _extract_architect_json(session_data: dict, messages: list | None = None):
          ``message`` field in v3; we also fall back to ``content`` for
          forward/backward compatibility.
 
-    Returns the parsed dict if all required fields are present, else None.
+    Returns a ``(plan_dict, source)`` tuple where ``source`` is one of
+    ``"structured_output"``, ``"messages"``, or ``None`` (when no plan could
+    be extracted). ``plan_dict`` is ``None`` iff ``source`` is ``None``.
     """
     # 1. structured_output
     structured = session_data.get("structured_output")
     if structured and isinstance(structured, dict):
         if _REQUIRED_PLAN_FIELDS.issubset(structured.keys()):
-            return structured
+            return structured, "structured_output"
 
     # 2. scan messages in reverse (most recent first)
     candidates = messages
@@ -397,9 +398,9 @@ def _extract_architect_json(session_data: dict, messages: list | None = None):
 
         parsed = _parse_plan_from_text(content)
         if parsed is not None:
-            return parsed
+            return parsed, "messages"
 
-    return None
+    return None, None
 
 
 def _parse_plan_from_text(text: str):
