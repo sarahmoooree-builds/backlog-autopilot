@@ -12,20 +12,12 @@ Output: list[PlannedIssue] sorted by total_score descending (rank 1 = best)
 """
 
 import json
-import os
 import time
 import requests
 from datetime import datetime
-from dotenv import load_dotenv
 
+from config import DEVIN_API_BASE, DEVIN_API_KEY, PLANNER_TIMEOUT, POLL_INTERVAL
 from priorities import PlannerStrategy, get_strategy, BALANCED_INTENT
-
-load_dotenv()
-_DEVIN_API_KEY  = os.getenv("DEVIN_API_KEY")
-_DEVIN_ORG_ID   = os.getenv("DEVIN_ORG_ID")
-_DEVIN_API_BASE = f"https://api.devin.ai/v3/organizations/{_DEVIN_ORG_ID}"
-_PLANNER_TIMEOUT = 480   # 8 minutes for a full batch
-_POLL_INTERVAL   = 10
 
 # ---------------------------------------------------------------------------
 # Configurable PM weights
@@ -342,14 +334,14 @@ def plan_issues_with_devin(ingested: list) -> dict:
     )
 
     headers = {
-        "Authorization": f"Bearer {_DEVIN_API_KEY}",
+        "Authorization": f"Bearer {DEVIN_API_KEY}",
         "Content-Type": "application/json",
     }
 
     print(f"[planner] Creating Devin planner session for {len(ingested)} issues…")
     try:
         response = requests.post(
-            f"{_DEVIN_API_BASE}/sessions",
+            f"{DEVIN_API_BASE}/sessions",
             headers=headers,
             json={"prompt": prompt, "bypass_approval": True},
             timeout=30,
@@ -371,7 +363,7 @@ def plan_issues_with_devin(ingested: list) -> dict:
     # Poll until done.
     # Same early-exit strategy as ingest: detect JSON in the response rather than
     # relying solely on a terminal status that may never arrive for text-output sessions.
-    deadline = time.time() + _PLANNER_TIMEOUT
+    deadline = time.time() + PLANNER_TIMEOUT
     attempt  = 0
     result   = None
     _NON_TERMINAL = ("running", "starting", "queued", "initializing", "created", "claimed")
@@ -379,8 +371,8 @@ def plan_issues_with_devin(ingested: list) -> dict:
         attempt += 1
         try:
             r = requests.get(
-                f"{_DEVIN_API_BASE}/sessions/{session_id}",
-                headers={"Authorization": f"Bearer {_DEVIN_API_KEY}"},
+                f"{DEVIN_API_BASE}/sessions/{session_id}",
+                headers={"Authorization": f"Bearer {DEVIN_API_KEY}"},
                 timeout=15,
             )
             if r.status_code == 200:
@@ -404,12 +396,12 @@ def plan_issues_with_devin(ingested: list) -> dict:
                     break
         except requests.exceptions.RequestException as e:
             print(f"[planner] Poll #{attempt}: {e}")
-        time.sleep(_POLL_INTERVAL)
+        time.sleep(POLL_INTERVAL)
 
     if not result:
         return {"status": "error", "session_id": session_id, "session_url": session_url,
                 "issues": [],
-                "error": f"Timed out after {_PLANNER_TIMEOUT // 60} min. Session: {session_url}"}
+                "error": f"Timed out after {PLANNER_TIMEOUT // 60} min. Session: {session_url}"}
 
     # Extract JSON — try session data first, then the messages endpoint as fallback.
     parsed = _extract_json_array(result)
@@ -546,14 +538,14 @@ def analyse_issues_with_devin(raw_issues: list) -> dict:
     )
 
     headers = {
-        "Authorization": f"Bearer {_DEVIN_API_KEY}",
+        "Authorization": f"Bearer {DEVIN_API_KEY}",
         "Content-Type": "application/json",
     }
 
     print(f"[analyse] Creating Devin analysis session for {len(raw_issues)} issues…")
     try:
         response = requests.post(
-            f"{_DEVIN_API_BASE}/sessions",
+            f"{DEVIN_API_BASE}/sessions",
             headers=headers,
             json={"prompt": prompt, "bypass_approval": True},
             timeout=30,
@@ -573,7 +565,7 @@ def analyse_issues_with_devin(raw_issues: list) -> dict:
     print(f"[analyse] Session created: {session_url}")
 
     # Poll until done — same terminal detection as ingest/planner
-    deadline = time.time() + _PLANNER_TIMEOUT
+    deadline = time.time() + PLANNER_TIMEOUT
     attempt  = 0
     result   = None
     _NON_TERMINAL = ("running", "starting", "queued", "initializing", "created", "claimed")
@@ -581,8 +573,8 @@ def analyse_issues_with_devin(raw_issues: list) -> dict:
         attempt += 1
         try:
             r = requests.get(
-                f"{_DEVIN_API_BASE}/sessions/{session_id}",
-                headers={"Authorization": f"Bearer {_DEVIN_API_KEY}"},
+                f"{DEVIN_API_BASE}/sessions/{session_id}",
+                headers={"Authorization": f"Bearer {DEVIN_API_KEY}"},
                 timeout=15,
             )
             if r.status_code == 200:
@@ -604,12 +596,12 @@ def analyse_issues_with_devin(raw_issues: list) -> dict:
                     break
         except requests.exceptions.RequestException as e:
             print(f"[analyse] Poll #{attempt}: {e}")
-        time.sleep(_POLL_INTERVAL)
+        time.sleep(POLL_INTERVAL)
 
     if not result:
         return {"status": "error", "session_id": session_id, "session_url": session_url,
                 "issues": [],
-                "error": f"Timed out after {_PLANNER_TIMEOUT // 60} min. Session: {session_url}"}
+                "error": f"Timed out after {PLANNER_TIMEOUT // 60} min. Session: {session_url}"}
 
     parsed = _extract_json_array(result)
     if not parsed:
@@ -673,14 +665,14 @@ def _fetch_and_extract_messages(session_id: str, label: str = "planner"):
     scan them for a JSON array. Returns list or None.
     """
     endpoints = [
-        f"{_DEVIN_API_BASE}/sessions/{session_id}/messages",
-        f"{_DEVIN_API_BASE}/sessions/{session_id}?include_messages=true",
+        f"{DEVIN_API_BASE}/sessions/{session_id}/messages",
+        f"{DEVIN_API_BASE}/sessions/{session_id}?include_messages=true",
     ]
     for url in endpoints:
         try:
             r = requests.get(
                 url,
-                headers={"Authorization": f"Bearer {_DEVIN_API_KEY}"},
+                headers={"Authorization": f"Bearer {DEVIN_API_KEY}"},
                 timeout=15,
             )
             print(f"[{label}] Messages endpoint {url} → HTTP {r.status_code}")

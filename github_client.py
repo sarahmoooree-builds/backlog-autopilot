@@ -5,26 +5,23 @@ Pulls real issues and PRs from the finserv-platform repo using the
 GitHub REST API v3 via the `requests` library.
 """
 
-import os
 from datetime import datetime, timezone, timedelta
 
 import requests
 
-# The repo Backlog Autopilot monitors
-REPO = "sarahmoooree-builds/finserv-platform"
+from config import GITHUB_TOKEN, TARGET_REPO
 
 API_ROOT = "https://api.github.com"
-BASE_URL = f"{API_ROOT}/repos/{REPO}"
+BASE_URL = f"{API_ROOT}/repos/{TARGET_REPO}"
 
 
 def _headers():
-    token = os.getenv("GITHUB_TOKEN")
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
     return headers
 
 
