@@ -526,6 +526,50 @@ def reorder_by_tier(issues: list) -> list:
 _reorder_by_tier = reorder_by_tier
 
 
+def rescore_with_strategy(issues: list, strategy: PlannerStrategy) -> list:
+    """Re-apply a strategy's tier policy and weights to already-scored issues.
+
+    Preserves existing dimension scores (severity, reach, etc.) but recomputes
+    tier, tier_reason, score_within_tier, total_score, recommended,
+    recommendation_reason, and priority_rank using the given strategy.
+
+    Used by the Devin path in app.load_and_plan() so that switching goals
+    produces genuinely different rankings without discarding Devin's richer
+    per-dimension scores.
+    """
+    active_weights = strategy.weights
+
+    for issue in issues:
+        ps = issue["planner_score"]
+        scores = {
+            "severity":       ps.get("severity", 5),
+            "reach":          ps.get("reach", 5),
+            "business_value": ps.get("business_value", 4),
+            "ease":           ps.get("ease", 5),
+            "confidence":     ps.get("confidence", 4),
+            "urgency":        ps.get("urgency", 5),
+        }
+
+        if strategy.tier_fn is not None:
+            tier, tier_reason = strategy.tier_fn(issue, scores)
+        else:
+            tier, tier_reason = 3, "No tier policy — default"
+
+        score_within_tier = compute_tier_score(scores, active_weights)
+        total_score = _derive_total_score(tier, score_within_tier)
+        recommended, reason = recommend(tier, scores, issue)
+
+        ps["tier"] = tier
+        ps["tier_reason"] = tier_reason
+        ps["score_within_tier"] = score_within_tier
+        ps["total_score"] = total_score
+        ps["recommended"] = recommended
+        ps["recommendation_reason"] = reason
+
+    reorder_by_tier(issues)
+    return issues
+
+
 def apply_refinement(issues: list, refinement_text: str) -> list:
     """Boost score_within_tier for issues matching refinement keywords.
 

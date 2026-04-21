@@ -13,6 +13,7 @@ from planner import (
     migrate_legacy_score,
     plan_issues,
     recommend,
+    rescore_with_strategy,
     score_business_value,
     score_confidence,
     score_ease,
@@ -479,3 +480,83 @@ class TestComputeTotalScoreLegacy:
         # 8*.35 + 6*.25 + (10-2)*.20 + 10*.20 = 7.9
         total = compute_total_score(legacy_scores, legacy_weights)
         assert total == pytest.approx(7.9, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# rescore_with_strategy — Devin-path goal switching
+# ---------------------------------------------------------------------------
+
+_PLANNER_SCORE_KEYS = {
+    "severity", "reach", "business_value", "ease", "confidence", "urgency",
+    "tier",
+}
+
+
+def _planned_issue(**overrides) -> dict:
+    """Build a minimal PlannedIssue-shaped dict for rescore_with_strategy tests.
+
+    Keyword args that look like planner_score dimensions (severity, reach,
+    business_value, ease, confidence, urgency, tier) go into planner_score;
+    everything else goes on the top-level issue dict. Mirrors the pattern used
+    by the existing ``_issue()`` helper.
+    """
+    score_overrides = {k: overrides.pop(k) for k in list(overrides)
+                       if k in _PLANNER_SCORE_KEYS}
+    issue = _issue(**overrides)
+    issue["planner_score"] = {
+        "severity":              score_overrides.get("severity", 5),
+        "reach":                 score_overrides.get("reach", 5),
+        "business_value":        score_overrides.get("business_value", 5),
+        "ease":                  score_overrides.get("ease", 5),
+        "confidence":            score_overrides.get("confidence", 5),
+        "urgency":               score_overrides.get("urgency", 5),
+        "tier":                  score_overrides.get("tier", 3),
+        "tier_reason":           "",
+        "score_within_tier":     0.0,
+        "total_score":           0.0,
+        "recommended":           False,
+        "recommendation_reason": "",
+        "priority_rank":         0,
+    }
+    return issue
+
+
+class TestRescoreWithStrategy:
+    def test_worst_bugs_demotes_non_bugs(self):
+        """Non-bug issues should be tier 4 under worst_bugs."""
+        issues = [_planned_issue(issue_type="feature_request", tier=2)]
+        strategy = get_strategy("worst_bugs")
+        rescore_with_strategy(issues, strategy)
+        assert issues[0]["planner_score"]["tier"] == 4
+
+    def test_quick_wins_promotes_easy_issues(self):
+        """Low-complexity narrow-scope issues should be tier 1 under quick_wins."""
+        issues = [_planned_issue(issue_type="bug", complexity="low",
+                                 scope="narrow", confidence=8, tier=3)]
+        strategy = get_strategy("quick_wins")
+        rescore_with_strategy(issues, strategy)
+        assert issues[0]["planner_score"]["tier"] == 1
+
+    def test_different_goals_produce_different_order(self):
+        """Switching goals should reorder the list."""
+        bug = _planned_issue(id=1, issue_type="bug", complexity="high",
+                             labels=["critical"])
+        easy = _planned_issue(id=2, issue_type="tech_debt", complexity="low",
+                              scope="narrow")
+
+        issues_a = [dict(bug), dict(easy)]
+        rescore_with_strategy(issues_a, get_strategy("worst_bugs"))
+        order_a = [i["id"] for i in issues_a]
+
+        issues_b = [dict(bug), dict(easy)]
+        rescore_with_strategy(issues_b, get_strategy("quick_wins"))
+        order_b = [i["id"] for i in issues_b]
+
+        assert order_a != order_b
+
+    def test_preserves_dimension_scores(self):
+        """Dimension scores (severity, reach, etc.) should not be overwritten."""
+        issues = [_planned_issue(severity=9, reach=2)]
+        rescore_with_strategy(issues, get_strategy("worst_bugs"))
+        assert issues[0]["planner_score"]["severity"] == 9
+        assert issues[0]["planner_score"]["reach"] == 2
