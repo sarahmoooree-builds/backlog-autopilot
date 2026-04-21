@@ -92,15 +92,35 @@ class TestEstimateFilesDelta:
     def test_returns_zero_without_scope_plan(self):
         assert _estimate_files_delta(_exec(estimated_files=["a.py"]), None) == 0
 
-    def test_positive_when_dispatched_more_than_estimated(self):
-        ex = _exec(estimated_files=["a.py", "b.py", "c.py"])
+    def test_blocked_returns_positive_proxy(self):
+        ex = _exec(status="Blocked")
+        plan = _plan(affected_files=["a.py"])
+        assert _estimate_files_delta(ex, plan) == 3
+
+    def test_completed_single_pr_is_zero(self):
+        ex = _exec(status="Completed", pull_requests=["p1"])
+        plan = _plan(affected_files=["a.py"])
+        assert _estimate_files_delta(ex, plan) == 0
+
+    def test_completed_extra_prs_add_2_each(self):
+        ex = _exec(status="Completed", pull_requests=["p1", "p2", "p3"])
+        plan = _plan(affected_files=["a.py"])
+        assert _estimate_files_delta(ex, plan) == 4  # (3-1) * 2
+
+    def test_awaiting_review_is_zero(self):
+        ex = _exec(status="Awaiting Review")
+        plan = _plan(affected_files=["a.py"])
+        assert _estimate_files_delta(ex, plan) == 0
+
+    def test_uses_actual_files_changed_int_when_present(self):
+        ex = _exec(status="Completed", actual_files_changed=5)
+        plan = _plan(affected_files=["a.py", "b.py"])
+        assert _estimate_files_delta(ex, plan) == 3
+
+    def test_uses_actual_files_changed_list_when_present(self):
+        ex = _exec(status="Completed", actual_files_changed=["a.py", "b.py", "c.py"])
         plan = _plan(affected_files=["a.py"])
         assert _estimate_files_delta(ex, plan) == 2
-
-    def test_negative_when_fewer_files_dispatched(self):
-        ex = _exec(estimated_files=["a.py"])
-        plan = _plan(affected_files=["a.py", "b.py", "c.py"])
-        assert _estimate_files_delta(ex, plan) == -2
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +161,13 @@ class TestDetectPatterns:
         assert "auth-false-positive" in tags
 
     def test_underestimated_scope_tag(self):
-        ex = _exec(estimated_files=["a", "b", "c", "d"])
+        # files_delta > 2 via the actual_files_changed path (real data takes
+        # precedence over the status+PR-count proxy).
+        ex = _exec(
+            status="Completed",
+            pull_requests=["p1"],
+            actual_files_changed=["a", "b", "c", "d", "e"],
+        )
         plan = _plan(affected_files=["a"])
         tags = _detect_patterns(ex, plan, _planned())
         assert "underestimated-scope" in tags

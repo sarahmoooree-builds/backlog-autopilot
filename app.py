@@ -1023,7 +1023,7 @@ with tab_pipeline:
                 if sp and sp.get("session_url"):
                     st.markdown(f"[View scope session]({sp['session_url']})")
 
-                matching_prs = [p for p in open_prs if str(issue_id) in p.get("title", "")]
+                matching_prs = [p for p in open_prs if f"#{issue_id}" in p.get("title", "")]
                 if matching_prs:
                     st.markdown("**Pull requests:**")
                     for pr in matching_prs:
@@ -1176,9 +1176,10 @@ with tab_business:
         if not planned:
             continue
         ps = planned.get("planner_score") or {}
-        impact_sum += int(ps.get("user_impact", 0)) + int(ps.get("business_impact", 0))
+        impact_sum += int(ps.get("severity", ps.get("user_impact", 0))) + int(ps.get("business_value", ps.get("business_impact", 0)))
         impact_count += 1
     if impact_count:
+        # max_possible = impact_count * (max severity + max business_value) = impact_count * 20
         max_possible = impact_count * 20
         impact_pct = (impact_sum / max_possible * 100) if max_possible else 0.0
         k1.metric(
@@ -1347,7 +1348,7 @@ with tab_business:
             if not planned:
                 continue
             ps = planned.get("planner_score") or {}
-            biz = int(ps.get("business_impact", 0))
+            biz = int(ps.get("business_value", ps.get("business_impact", 0)))
             labels = set(planned.get("labels") or [])
             if biz >= 7 or (labels & BUSINESS_LABELS):
                 high_impact.append((ex, planned))
@@ -1365,8 +1366,8 @@ with tab_business:
                 status = ex.get("status", "Completed")
                 st.markdown(
                     f"**#{ex['issue_id']} — {title}**  \n"
-                    f"business_impact: {int(ps.get('business_impact', 0))}/10 · "
-                    f"user_impact: {int(ps.get('user_impact', 0))}/10 · {status}"
+                    f"business_value: {int(ps.get('business_value', ps.get('business_impact', 0)))}/10 · "
+                    f"severity: {int(ps.get('severity', ps.get('user_impact', 0)))}/10 · {status}"
                 )
                 if outcome:
                     st.caption(f"\"{outcome}\"")

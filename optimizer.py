@@ -18,48 +18,26 @@ Output: list[OptimizationRecord]
 
 import json
 import logging
-import os
-import time
 import requests
 from datetime import datetime
 from typing import Optional
 from collections import Counter
 
-from dotenv import load_dotenv
-
 import store
-from config import SESSION
+import devin_client
+from config import (
+    DEVIN_API_KEY,
+    DEVIN_ORG_ID,
+    OPTIMIZER_TIMEOUT,
+    POLL_INTERVAL,
+    TARGET_REPO,  # noqa: F401 — re-exported for callers that import it here
+)
 from planner import migrate_legacy_score
 from prompts import OPTIMIZER_PROMPT
 
 logger = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = {"Completed", "Blocked", "Awaiting Review"}
-
-# ---------------------------------------------------------------------------
-# Devin API configuration (mirrors scope.py)
-# ---------------------------------------------------------------------------
-
-load_dotenv()
-DEVIN_API_KEY = os.getenv("DEVIN_API_KEY")
-DEVIN_ORG_ID = os.getenv("DEVIN_ORG_ID")
-
-TARGET_REPO = "sarahmoooree-builds/finserv-platform"
-DEVIN_API_BASE = f"https://api.devin.ai/v3/organizations/{DEVIN_ORG_ID}"
-
-OPTIMIZER_TIMEOUT = 480   # 8 minutes — Devin needs time to read PR diffs
-POLL_INTERVAL = 10        # seconds between status polls
-
-# Devin v3 statuses the optimizer treats as "still working" — anything else
-# is terminal. See scope.py for the same vocabulary.
-_NON_TERMINAL_STATUSES = (
-    "new", "creating", "claimed", "running", "resuming",
-    # legacy aliases retained for safety if older payloads appear
-    "starting", "queued", "initializing", "created",
-)
-# status_detail values (with status="running") that indicate Devin has
-# produced its final work product and is simply idle/awaiting the next step.
-_WORK_PRODUCT_READY_DETAILS = ("waiting_for_user", "finished")
 
 
 # ---------------------------------------------------------------------------
@@ -209,14 +187,34 @@ def _estimate_lines_delta(execution: dict, scope_plan: Optional[dict]) -> int:
 
 def _estimate_files_delta(execution: dict, scope_plan: Optional[dict]) -> int:
     """
-    Compare the number of estimated files (from ScopePlan) to the number
-    of files recorded at dispatch time in the ExecutionSession.
+    Proxy for actual files-changed delta vs. the Scope plan.
+
+    When real data is available (e.g. from the Devin-powered optimizer's
+    `actual_files_changed`, or from the PRs Devin actually opened), compare
+    against the Scope plan's affected_files. Otherwise fall back to a proxy
+    based on status + PR count, mirroring `_estimate_lines_delta`:
+      - Blocked: likely underestimate → +3
+      - Completed + more than 1 PR: scope crept → +2 per extra PR
+      - Otherwise: 0
     """
     if not scope_plan:
         return 0
     estimated_count = len(scope_plan.get("affected_files", []))
-    dispatched_count = len(execution.get("estimated_files", []))
-    return dispatched_count - estimated_count
+
+    actual_files = execution.get("actual_files_changed")
+    if isinstance(actual_files, int):
+        return actual_files - estimated_count
+    if isinstance(actual_files, (list, tuple, set)):
+        return len(actual_files) - estimated_count
+
+    status = execution.get("status", "")
+    pr_count = len(execution.get("pull_requests", []))
+
+    if status == "Blocked":
+        return 3
+    if status == "Completed" and pr_count > 1:
+        return (pr_count - 1) * 2
+    return 0
 
 
 def _classify_accuracy(lines_delta: int, files_delta: int, status: str) -> str:
@@ -442,39 +440,20 @@ def run_optimizer_with_devin() -> list:
     ]
     prompt = _build_optimizer_prompt(executions, scope_plans, planned_issues)
 
-    headers = {
-        "Authorization": f"Bearer {DEVIN_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
     # --- Step 2: create the Devin session ---
     logger.info(
         "Creating Devin session for %d terminal execution(s)…", len(executions),
     )
     try:
-        # See devin_client.create_session — POST uses bare requests.post to
-        # avoid urllib3 retrying non-idempotent session creation on
-        # connection errors (allowed_methods=["GET"] is not honoured there).
-        response = requests.post(
-            f"{DEVIN_API_BASE}/sessions",
-            headers=headers,
-            json={"prompt": prompt, "bypass_approval": True},
-            timeout=30,
-        )
+        created = devin_client.create_session(prompt, bypass_approval=True)
     except requests.exceptions.RequestException as e:
         # No records have been persisted yet, so nothing to clean up. Raising
         # ensures the caller (app.py) surfaces the error instead of silently
         # caching a failure that would block future retries.
         raise RuntimeError(f"Could not reach Devin API: {str(e)}") from e
 
-    if response.status_code not in (200, 201):
-        raise RuntimeError(
-            f"Devin API returned {response.status_code}: {response.text[:200]}"
-        )
-
-    session_data = response.json()
-    session_id = session_data.get("session_id") or ""
-    session_url = session_data.get("url", f"https://app.devin.ai/sessions/{session_id}")
+    session_id = created["session_id"] or ""
+    session_url = created["session_url"]
 
     if not session_id:
         raise RuntimeError("No session_id returned from Devin API")
@@ -490,7 +469,12 @@ def run_optimizer_with_devin() -> list:
 
     # --- Step 4: poll until Devin finishes ---
     try:
-        result = _poll_until_done(session_id, headers)
+        result = devin_client.poll_until_done(
+            session_id,
+            timeout=OPTIMIZER_TIMEOUT,
+            poll_interval=POLL_INTERVAL,
+            label="optimizer",
+        )
         if not result:
             raise RuntimeError(
                 f"Devin session timed out after {OPTIMIZER_TIMEOUT // 60} minutes. "
@@ -507,7 +491,7 @@ def run_optimizer_with_devin() -> list:
         )
 
         # --- Step 5: pull messages + extract the JSON array ---
-        messages = _fetch_messages(session_id, headers)
+        messages = devin_client.fetch_messages(session_id, label="optimizer")
         devin_count = sum(
             1 for m in messages if (m.get("source") or "").lower() == "devin"
         )
@@ -516,7 +500,7 @@ def run_optimizer_with_devin() -> list:
             len(messages), devin_count,
         )
 
-        records = _extract_optimizer_json(result, messages)
+        records = devin_client.extract_json_array(result, messages)
         if not records:
             raise RuntimeError(
                 "Devin finished but optimizer JSON array could not be parsed. "
@@ -773,160 +757,3 @@ def _coerce_optional_int(value) -> Optional[int]:
         return None
 
 
-def _poll_until_done(session_id: str, headers: dict):
-    """
-    Poll the Devin session every POLL_INTERVAL seconds until a terminal state
-    or timeout. Mirrors scope._poll_until_done.
-    """
-    deadline = time.time() + OPTIMIZER_TIMEOUT
-    attempt = 0
-
-    while time.time() < deadline:
-        attempt += 1
-        try:
-            response = SESSION.get(
-                f"{DEVIN_API_BASE}/sessions/{session_id}",
-                headers=headers,
-                timeout=15,
-            )
-            if response.status_code == 200:
-                session = response.json()
-                status = (session.get("status") or "unknown").lower()
-                detail = (session.get("status_detail") or "").lower()
-                logger.debug(
-                    "Poll #%d: status=%r detail=%r", attempt, status, detail,
-                )
-                if status not in _NON_TERMINAL_STATUSES:
-                    logger.info(
-                        "Poll #%d: terminal status (%r)", attempt, status,
-                    )
-                    return session
-                if detail in _WORK_PRODUCT_READY_DETAILS:
-                    logger.info(
-                        "Poll #%d: Devin work product ready (status=%r, detail=%r)",
-                        attempt, status, detail,
-                    )
-                    return session
-            else:
-                logger.warning(
-                    "Poll #%d: HTTP %d", attempt, response.status_code,
-                )
-        except requests.exceptions.RequestException as e:
-            logger.warning("Poll #%d: request error — %s", attempt, e)
-
-        time.sleep(POLL_INTERVAL)
-
-    logger.warning(
-        "Timed out after %ds (%d polls)", OPTIMIZER_TIMEOUT, attempt,
-    )
-    return None
-
-
-def _fetch_messages(session_id: str, headers: dict) -> list:
-    """
-    Fetch all messages for a Devin session. Mirrors scope._fetch_messages.
-    """
-    url = f"{DEVIN_API_BASE}/sessions/{session_id}/messages"
-    messages: list = []
-    cursor = None
-    pages = 0
-    max_pages = 20
-
-    while pages < max_pages:
-        params = {"first": 200}
-        if cursor:
-            params["after"] = cursor
-        try:
-            response = SESSION.get(url, headers=headers, params=params, timeout=20)
-        except requests.exceptions.RequestException as e:
-            logger.warning("_fetch_messages: request error — %s", e)
-            break
-        if response.status_code != 200:
-            logger.warning(
-                "_fetch_messages: HTTP %d — %s",
-                response.status_code, response.text[:200],
-            )
-            break
-        payload = response.json()
-        items = payload.get("items") or []
-        messages.extend(items)
-        if not payload.get("has_next_page"):
-            break
-        cursor = payload.get("end_cursor")
-        if not cursor:
-            break
-        pages += 1
-    return messages
-
-
-def _extract_optimizer_json(session_data: dict, messages=None):
-    """
-    Extract the JSON array of optimization records from a Devin session.
-
-    Precedence:
-      1. ``session_data["structured_output"]`` when it is a list.
-      2. Any Devin-authored message, scanned most-recent first, for a JSON
-         array embedded in the ``message``/``content`` field.
-
-    Returns a list of dicts, or ``None`` if no array could be parsed.
-    """
-    structured = session_data.get("structured_output")
-    if isinstance(structured, list) and structured:
-        return structured
-
-    candidates = messages
-    if candidates is None:
-        candidates = (session_data.get("messages")
-                      or session_data.get("items")
-                      or [])
-
-    for message in reversed(candidates or []):
-        content = message.get("message") or message.get("content") or ""
-        source = (message.get("source") or "").lower()
-        if source and source != "devin":
-            continue
-        if not content or not isinstance(content, str):
-            continue
-        parsed = _parse_array_from_text(content)
-        if parsed is not None:
-            return parsed
-
-    # Fallback: some Devin responses place the final JSON under top-level
-    # string fields rather than in messages.
-    for field in ("output", "result", "response", "output_text", "last_message"):
-        val = session_data.get(field)
-        if not val or not isinstance(val, str):
-            continue
-        parsed = _parse_array_from_text(val)
-        if parsed is not None:
-            return parsed
-
-    return None
-
-
-def _parse_array_from_text(text: str):
-    """Try to extract a JSON array from a text blob."""
-    if not isinstance(text, str):
-        return None
-    stripped = text.strip()
-
-    # Full-blob parse
-    try:
-        parsed = json.loads(stripped)
-        if isinstance(parsed, list):
-            return parsed
-    except (json.JSONDecodeError, AttributeError):
-        pass
-
-    # Balanced square-bracket extraction
-    start = stripped.find("[")
-    end = stripped.rfind("]") + 1
-    if start >= 0 and end > start:
-        try:
-            parsed = json.loads(stripped[start:end])
-            if isinstance(parsed, list):
-                return parsed
-        except json.JSONDecodeError:
-            pass
-
-    return None

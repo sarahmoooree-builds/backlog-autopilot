@@ -90,7 +90,7 @@ def classify_issue_type(issue: dict) -> str:
     title_lower = issue["title"].lower()
     desc_lower = issue["description"].lower()
     labels_lower = issue["labels"]  # already normalised by normalize_issue
-    combined = title_lower + " " + desc_lower + " ".join(labels_lower)
+    combined = title_lower + " " + desc_lower + " " + " ".join(labels_lower)
 
     if any(kw in labels_lower for kw in ["bug"]) or any(kw in combined for kw in BUG_KEYWORDS):
         return "bug"
