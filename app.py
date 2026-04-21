@@ -31,6 +31,7 @@ from github_client import (
 from ingest import ingest_issues
 from planner import (
     plan_issues,
+    apply_refinement,
     analyse_issues_with_devin,
     migrate_legacy_score,
     reorder_by_tier,
@@ -40,6 +41,7 @@ from priorities import (
     BALANCED_INTENT,
     describe_strategy,
     get_strategy,
+    goal_dimension_highlights,
     parse_prioritization_intent,
     weight_highlights,
 )
@@ -106,6 +108,13 @@ st.markdown(
         margin: 1.2rem 0 1.1rem 0;
         border-top: 1px dashed rgba(255,255,255,0.12);
       }
+      .ba-tier-badge {
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 12px;
+        font-weight: 600;
+        font-size: 0.85rem;
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -146,7 +155,8 @@ def get_pipeline_mode() -> tuple:
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=60)
-def load_and_plan(intent: str, ingest_mode: str, planner_mode: str):
+def load_and_plan(intent: str, ingest_mode: str, planner_mode: str,
+                  refinement: str = ""):
     strategy = get_strategy(intent)
 
     if planner_mode == "devin":
@@ -161,16 +171,25 @@ def load_and_plan(intent: str, ingest_mode: str, planner_mode: str):
             # Match the rule-based path: tier ascending (T1 first), then
             # score_within_tier descending, re-assigning priority_rank so the
             # UI "Priority: #N" badge matches the visible order.
-            return reorder_by_tier(records)
+            ordered = reorder_by_tier(records)
+            if refinement:
+                ordered = apply_refinement(ordered, refinement)
+            return ordered
 
     if ingest_mode == "devin":
         ingested = store.all_records("ingested")
         if ingested:
-            return plan_issues(ingested, strategy=strategy)
+            planned = plan_issues(ingested, strategy=strategy)
+            if refinement:
+                planned = apply_refinement(planned, refinement)
+            return planned
 
     raw = fetch_issues()
     ingested = ingest_issues(raw)
-    return plan_issues(ingested, strategy=strategy)
+    planned = plan_issues(ingested, strategy=strategy)
+    if refinement:
+        planned = apply_refinement(planned, refinement)
+    return planned
 
 
 @st.cache_data(ttl=60)
@@ -195,15 +214,21 @@ def load_merged_prs(days: int = 30):
         return []
 
 
-# Prioritization state — interpreted intent drives the planner.
-if "prioritization_text" not in st.session_state:
-    st.session_state.prioritization_text = ""
+# Prioritization state — goal buttons are the primary path; freeform text is
+# kept as a fallback for users who prefer natural-language steering.
+if "selected_goal" not in st.session_state:
+    st.session_state.selected_goal = BALANCED_INTENT
 if "prioritization_intent" not in st.session_state:
     st.session_state.prioritization_intent = BALANCED_INTENT
+if "refinement_text" not in st.session_state:
+    st.session_state.refinement_text = ""
+if "prioritization_text" not in st.session_state:
+    st.session_state.prioritization_text = ""
 
 ingest_mode, planner_mode = get_pipeline_mode()
 planned_issues = load_and_plan(
-    st.session_state.prioritization_intent, ingest_mode, planner_mode
+    st.session_state.prioritization_intent, ingest_mode, planner_mode,
+    st.session_state.get("refinement_text", ""),
 )
 auto_recommended = [i for i in planned_issues if i["planner_score"]["recommended"]]
 manual_recommended = [i for i in planned_issues if not i["planner_score"]["recommended"]]
@@ -348,71 +373,101 @@ with tab_pipeline:
     # Business Impact tab.
     # -----------------------------------------------------------------------
 
-    def _apply_prioritization_text():
-        text = st.session_state.get("prioritization_input", "")
-        st.session_state.prioritization_text = text
-        st.session_state.prioritization_intent = parse_prioritization_intent(text)
+    # Goal-selector callbacks -------------------------------------------------
+
+    def _select_goal(intent: str):
+        """Called when a goal button is clicked."""
+        st.session_state.selected_goal = intent
+        st.session_state.prioritization_intent = intent
+        st.session_state.refinement_text = ""
+        load_and_plan.clear()
+        st.toast(f"Re-ranked: {get_strategy(intent).label}")
+
+    def _apply_refinement():
+        """Called when the refinement text changes."""
+        st.session_state.refinement_text = st.session_state.get(
+            "refinement_input", ""
+        )
         load_and_plan.clear()
 
-    def _reset_prioritization():
-        st.session_state.prioritization_input = ""
-        st.session_state.prioritization_text = ""
+    def _reset_goal():
+        st.session_state.selected_goal = BALANCED_INTENT
         st.session_state.prioritization_intent = BALANCED_INTENT
+        st.session_state.refinement_text = ""
         load_and_plan.clear()
+        st.toast("Reset to balanced")
+
+    GOAL_OPTIONS = [
+        ("worst_bugs",      "Worst bugs"),
+        ("quick_wins",      "Quick wins"),
+        ("business_impact", "Business impact"),
+        ("stale_cleanup",   "Stale cleanup"),
+    ]
 
     with st.container(border=True):
-        st.subheader("What are you prioritizing?")
+        st.subheader("What's today's goal?")
         st.caption(
-            "Describe today's goal in plain English. We'll adjust issue scoring "
-            "automatically — no manual weight tuning."
-        )
-        st.text_input(
-            "Prioritization goal",
-            key="prioritization_input",
-            placeholder="e.g. I want to fix the worst bugs affecting users",
-            on_change=_apply_prioritization_text,
-            label_visibility="collapsed",
+            "Pick a goal to re-rank the backlog. Refine with a short phrase "
+            "if you want to focus within that goal."
         )
 
-        active_intent = st.session_state.prioritization_intent
+        cols = st.columns(len(GOAL_OPTIONS))
+        for col, (intent, label) in zip(cols, GOAL_OPTIONS):
+            with col:
+                is_active = st.session_state.selected_goal == intent
+                col.button(
+                    label,
+                    key=f"goal_{intent}",
+                    on_click=_select_goal,
+                    args=(intent,),
+                    type="primary" if is_active else "secondary",
+                    use_container_width=True,
+                )
+
+        active_intent = st.session_state.selected_goal
         active_strategy = get_strategy(active_intent)
-        has_text = bool(st.session_state.get("prioritization_input", "").strip())
 
-        summary_col, badges_col = st.columns([6, 4])
-        with summary_col:
-            if active_intent == BALANCED_INTENT and not has_text:
-                st.caption(
-                    f"**Default strategy — {active_strategy.label}.** "
-                    "Enter a goal above to re-rank the backlog."
-                )
-            else:
-                st.markdown(
-                    f"**{active_strategy.label}** — "
-                    f"{describe_strategy(active_intent).replace('Prioritizing: ', '')}"
-                )
-        with badges_col:
-            highlights = weight_highlights(active_intent, top_n=2)
-            priority_badge_html = " ".join(
-                f"<span style='background:rgba(27,122,142,0.18); color:#7fd0df; "
-                f"padding:4px 10px; border-radius:12px; font-size:0.8em; "
-                f"margin-right:6px;'>{label} {pct}%</span>"
-                for label, pct in highlights
-            )
-            st.markdown(
-                f"<div style='text-align:right'>{priority_badge_html}</div>",
-                unsafe_allow_html=True,
-            )
+        if active_intent != BALANCED_INTENT:
+            with st.container(border=True):
+                st.markdown(f"**Active goal: {active_strategy.label}**")
+                st.caption(active_strategy.summary)
 
-        if has_text:
-            # Reset must happen in an on_click callback: Streamlit forbids
-            # writing to `st.session_state.prioritization_input` after the
-            # text_input widget has been instantiated on the current run.
-            # Callbacks fire before the next render, so we can safely clear
-            # the widget key there.
-            st.button(
-                "Reset to balanced",
-                key="reset_prioritization",
-                on_click=_reset_prioritization,
+                highlights = goal_dimension_highlights(active_intent)
+                if highlights:
+                    emphasis_color = {
+                        "primary":  "#7fd0df",
+                        "high":     "#8ee39f",
+                        "moderate": "#c9c9c9",
+                    }
+                    badge_html = " · ".join(
+                        f"<span style='color:{emphasis_color.get(level, '#c9c9c9')}; "
+                        f"font-weight:600;'>{dim}</span>"
+                        f" <span style='color:rgba(255,255,255,0.55); font-size:0.85em;'>"
+                        f"({level})</span>"
+                        for dim, level in highlights
+                    )
+                    st.markdown(badge_html, unsafe_allow_html=True)
+
+                st.text_input(
+                    "Optional: refine your goal",
+                    key="refinement_input",
+                    value=st.session_state.refinement_text,
+                    placeholder='e.g. "Focus on onboarding" or "customer-facing"',
+                    on_change=_apply_refinement,
+                )
+                if st.session_state.refinement_text:
+                    st.caption(
+                        f'Filtering within **{active_strategy.label}** for: '
+                        f'"{st.session_state.refinement_text}"'
+                    )
+
+                st.button("Reset to balanced", on_click=_reset_goal,
+                          key="reset_goal")
+        else:
+            st.caption(
+                "Currently **balanced** — even spread across severity, reach, "
+                "business value, ease, confidence, and urgency. Pick a goal above "
+                "to focus the ranking."
             )
 
     st.markdown("")
@@ -626,11 +681,19 @@ with tab_pipeline:
                     st.session_state.selected_ids.discard(issue_id)
 
         with col_info:
+            tier = score.get("tier")
             # Title row with status badge via markdown header
-            header_line = (
-                f"#{issue_id} — {issue['title']}  ·  "
-                f"score {score['total_score']:.1f}/10"
-            )
+            if tier:
+                header_line = (
+                    f"#{issue_id} — {issue['title']}  ·  "
+                    f"Tier {tier} · "
+                    f"{score.get('score_within_tier', score.get('total_score', 0)):.1f}"
+                )
+            else:
+                header_line = (
+                    f"#{issue_id} — {issue['title']}  ·  "
+                    f"score {score.get('total_score', 0):.1f}/10"
+                )
             # Streamlit expanders don't render HTML in their label — render a badge
             # on the line above the expander so status is always visible.
             st.markdown(
@@ -638,13 +701,44 @@ with tab_pipeline:
                 unsafe_allow_html=True,
             )
             with st.expander(header_line):
-                # Priority row
-                sc1, sc2, sc3, sc4, sc5 = st.columns(5)
-                sc1.metric("Priority",   f"#{score['priority_rank']}")
-                sc2.metric("Impact",     f"{score['user_impact']}/10")
-                sc3.metric("Business",   f"{score['business_impact']}/10")
-                sc4.metric("Effort",     f"{score['effort']}/10")
-                sc5.metric("Confidence", f"{score['confidence']}/10")
+                # Priority / tier row
+                if tier:
+                    tier_labels = {1: "Critical", 2: "High",
+                                   3: "Normal", 4: "Deferred"}
+                    tier_colors = {1: "#e74c3c", 2: "#e67e22",
+                                   3: "#3498db", 4: "#95a5a6"}
+                    color = tier_colors.get(tier, "#95a5a6")
+                    st.markdown(
+                        f"<span class='ba-tier-badge' "
+                        f"style='background:{color}22; color:{color};'>"
+                        f"Tier {tier}: {tier_labels.get(tier, 'Unknown')}"
+                        f"</span>  "
+                        f"<span style='color:rgba(255,255,255,0.65); "
+                        f"font-size:0.9rem;'>"
+                        f"Priority #{score.get('priority_rank', 0)}"
+                        f"</span>",
+                        unsafe_allow_html=True,
+                    )
+                    tier_reason = score.get("tier_reason", "")
+                    if tier_reason:
+                        st.caption(tier_reason)
+
+                    sc1, sc2, sc3, sc4, sc5, sc6 = st.columns(6)
+                    sc1.metric("Severity",   f"{score.get('severity', '—')}/10")
+                    sc2.metric("Reach",      f"{score.get('reach', '—')}/10")
+                    sc3.metric("Business",   f"{score.get('business_value', '—')}/10")
+                    sc4.metric("Ease",       f"{score.get('ease', '—')}/10")
+                    sc5.metric("Confidence", f"{score.get('confidence', '—')}/10")
+                    sc6.metric("Urgency",    f"{score.get('urgency', '—')}/10")
+                else:
+                    # Backward compat for any record that slips through without
+                    # a tier (shouldn't happen post-migrate_legacy_score).
+                    sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+                    sc1.metric("Priority",   f"#{score.get('priority_rank', 0)}")
+                    sc2.metric("Impact",     f"{score.get('user_impact', '—')}/10")
+                    sc3.metric("Business",   f"{score.get('business_impact', '—')}/10")
+                    sc4.metric("Effort",     f"{score.get('effort', '—')}/10")
+                    sc5.metric("Confidence", f"{score.get('confidence', '—')}/10")
 
                 # Recommendation reason — always shown so "why" is obvious
                 st.markdown(
