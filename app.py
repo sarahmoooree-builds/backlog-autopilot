@@ -263,6 +263,13 @@ STATUS_STYLE = {
     "blocked":         ("Blocked",           "rgba(220,53,69,0.22)",   "#ff8a94"),
 }
 
+# Statuses for which an issue's row renders with a disabled, pinned-True
+# checkbox (see render_issue_row). Used to decide which widget-state keys are
+# safe to write when programmatically clearing selection.
+DISABLED_CHECKBOX_STATUSES = frozenset({
+    "completed", "in_progress", "awaiting_review", "blocked", "scoping",
+})
+
 
 def derive_status(issue_id: int) -> str:
     """
@@ -556,9 +563,52 @@ with tab_pipeline:
         i["id"] for i in planned_issues
         if derive_status(i["id"]) == "not_scoped" and not store.is_dispatched(i["id"])
     }
+
+    # Reconcile `selected_ids` from each enabled-path checkbox's widget state
+    # *before* the action row is drawn. The issue rows further below
+    # (render_issue_row) read each widget back into `selected_ids`, but that
+    # happens after the action row has already been rendered, so without this
+    # pass the Clear / Scope / Run buttons would evaluate `selected_ids` from
+    # the previous rerun and show stale disabled/enabled state on the first
+    # click — the "click twice to see the button light up" symptom.
+    for _issue in planned_issues:
+        _iid = _issue["id"]
+        if store.is_dispatched(_iid):
+            continue
+        if derive_status(_iid) in DISABLED_CHECKBOX_STATUSES:
+            continue
+        _key = f"select_{_iid}"
+        if _key in st.session_state:
+            if st.session_state[_key]:
+                st.session_state.selected_ids.add(_iid)
+            else:
+                st.session_state.selected_ids.discard(_iid)
+
     currently_selected = st.session_state.selected_ids & selectable_ids
 
     # --- Action row ---
+    # Emit the styled-CTA CSS once *before* the columns so it doesn't inject
+    # an invisible markdown element inside column 3/4 that pushes those
+    # buttons a few pixels below the plain buttons in columns 1/2.
+    # Scoped via the buttons' st-key classes so it doesn't leak into the
+    # goal selector row (also a 4-column row).
+    st.markdown(
+        """<style>
+        .st-key-scope_selected_cta button {
+            background-color: #1B7A8E; color: white; border: none;
+        }
+        .st-key-scope_selected_cta button:hover {
+            background-color: #145c6b; color: white; border: none;
+        }
+        .st-key-run_execution_cta button {
+            background-color: #28a745; color: white; border: none;
+        }
+        .st-key-run_execution_cta button:hover {
+            background-color: #218838; color: white; border: none;
+        }
+        </style>""",
+        unsafe_allow_html=True,
+    )
     a1, a2, a3, a4 = st.columns([2.0, 2.2, 2.2, 3.6])
 
     with a1:
@@ -566,10 +616,26 @@ with tab_pipeline:
             for i in auto_recommended:
                 if i["id"] in selectable_ids:
                     st.session_state.selected_ids.add(i["id"])
+                    # Keep the checkbox widget state in sync so the UI reflects
+                    # the programmatic selection on the next render.
+                    st.session_state[f"select_{i['id']}"] = True
             st.rerun()
 
     with a2:
         if st.button("Clear selection", disabled=not currently_selected):
+            # Reset widget state for every selected issue that renders through
+            # the *enabled* checkbox path. Rows on the disabled path (see
+            # render_issue_row) are pinned to value=True and Streamlit ignores
+            # value= once a key has state, so we must not write False there or
+            # locked-in rows will visually flip to unchecked. "Selectable" is
+            # not a tight enough filter — scope_failed / scope_review / ready
+            # rows are also enabled checkboxes but aren't in selectable_ids.
+            for iid in list(st.session_state.selected_ids):
+                if store.is_dispatched(iid):
+                    continue
+                if derive_status(iid) in DISABLED_CHECKBOX_STATUSES:
+                    continue
+                st.session_state[f"select_{iid}"] = False
             st.session_state.selected_ids.clear()
             st.rerun()
 
@@ -580,22 +646,7 @@ with tab_pipeline:
             if i["id"] in st.session_state.selected_ids
             and derive_status(i["id"]) == "not_scoped"
         ]
-        scope_label = f"Scope selected issues ({len(to_scope)})" if to_scope else "Scope selected issues"
-        # Scope the action-row styling via the button's own st-key class so
-        # it doesn't leak into any other 4-column row on the page (the goal
-        # selector at app.py:424 is also st.columns(4); :nth-child(3) used
-        # to paint the 3rd goal button teal).
-        st.markdown(
-            """<style>
-            .st-key-scope_selected_cta button {
-                background-color: #1B7A8E; color: white; border: none;
-            }
-            .st-key-scope_selected_cta button:hover {
-                background-color: #145c6b; color: white; border: none;
-            }
-            </style>""",
-            unsafe_allow_html=True,
-        )
+        scope_label = "Scope selected issues"
         if st.button(scope_label, disabled=len(to_scope) == 0, key="scope_selected_cta"):
             try:
                 with st.spinner(
@@ -629,18 +680,6 @@ with tab_pipeline:
             and not store.is_dispatched(i["id"])
         ]
         run_label = f"Run execution ({len(to_run)})" if to_run else "Run execution"
-        # Same scoping fix as scope_selected_cta above — see comment there.
-        st.markdown(
-            """<style>
-            .st-key-run_execution_cta button {
-                background-color: #28a745; color: white; border: none;
-            }
-            .st-key-run_execution_cta button:hover {
-                background-color: #218838; color: white; border: none;
-            }
-            </style>""",
-            unsafe_allow_html=True,
-        )
         if st.button(run_label, disabled=len(to_run) == 0, key="run_execution_cta"):
             with st.spinner("Dispatching to Devin Executor…"):
                 execute_issues(to_run)
@@ -676,8 +715,7 @@ with tab_pipeline:
         col_check, col_info = st.columns([0.45, 9.55])
 
         with col_check:
-            if already_sent or status_key in ("completed", "in_progress", "awaiting_review",
-                                               "blocked", "scoping"):
+            if already_sent or status_key in DISABLED_CHECKBOX_STATUSES:
                 st.checkbox(
                     "Selected",
                     key=f"select_{issue_id}",
@@ -686,10 +724,16 @@ with tab_pipeline:
                     label_visibility="collapsed",
                 )
             else:
+                # Widget state (st.session_state[key]) is the source of truth
+                # once the widget has rendered — Streamlit ignores `value=` on
+                # subsequent renders when a key is set. Seed the widget state
+                # from `selected_ids` on first render, then read back after.
+                key = f"select_{issue_id}"
+                if key not in st.session_state:
+                    st.session_state[key] = issue_id in st.session_state.selected_ids
                 checked = st.checkbox(
                     "Select",
-                    key=f"select_{issue_id}",
-                    value=issue_id in st.session_state.selected_ids,
+                    key=key,
                     label_visibility="collapsed",
                 )
                 if checked:
