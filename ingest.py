@@ -8,12 +8,12 @@ Output: list[IngestedIssue]
 """
 
 import json
-import time
 import requests
 from datetime import datetime
 from typing import Optional
 
-from config import DEVIN_API_BASE, DEVIN_API_KEY, INGEST_TIMEOUT, POLL_INTERVAL
+import devin_client
+from config import INGEST_TIMEOUT, POLL_INTERVAL
 
 # ---------------------------------------------------------------------------
 # Classification keyword lists
@@ -215,77 +215,26 @@ def ingest_issues_with_devin(raw_issues: list) -> dict:
         issues_json=issues_json,
     )
 
-    headers = {
-        "Authorization": f"Bearer {DEVIN_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
     print(f"[ingest] Creating Devin ingest session for {len(raw_issues)} issues…")
     try:
-        response = requests.post(
-            f"{DEVIN_API_BASE}/sessions",
-            headers=headers,
-            json={"prompt": prompt, "bypass_approval": True},
-            timeout=30,
-        )
+        created = devin_client.create_session(prompt, bypass_approval=True)
     except requests.exceptions.RequestException as e:
         return {"status": "error", "session_id": "", "session_url": "",
                 "issues": [], "error": f"Could not reach Devin API: {e}"}
-
-    if response.status_code not in (200, 201):
+    except RuntimeError as e:
         return {"status": "error", "session_id": "", "session_url": "",
-                "issues": [],
-                "error": f"API returned {response.status_code}: {response.text[:200]}"}
+                "issues": [], "error": str(e)}
 
-    data = response.json()
-    session_id  = data.get("session_id", "")
-    session_url = data.get("url", f"https://app.devin.ai/sessions/{session_id}")
+    session_id  = created["session_id"]
+    session_url = created["session_url"]
     print(f"[ingest] Session created: {session_url}")
 
-    # Poll until done.
-    # Devin text-output sessions (no repo) often complete their task and then
-    # "await instructions" — which may appear as "running" indefinitely in the API
-    # rather than a true terminal status. So we also exit early when valid JSON
-    # is detectable in the response, regardless of reported status.
-    deadline = time.time() + INGEST_TIMEOUT
-    attempt  = 0
-    result   = None
-    # "claimed" = session created but Devin hasn't started yet — keep polling
-    _NON_TERMINAL = ("running", "starting", "queued", "initializing", "created", "claimed")
-    while time.time() < deadline:
-        attempt += 1
-        try:
-            r = requests.get(
-                f"{DEVIN_API_BASE}/sessions/{session_id}",
-                headers={"Authorization": f"Bearer {DEVIN_API_KEY}"},
-                timeout=15,
-            )
-            if r.status_code == 200:
-                session = r.json()
-                status  = session.get("status", "").lower()
-                detail  = session.get("status_detail", "")
-                print(f"[ingest] Poll #{attempt}: status={status!r} detail={detail!r}")
-
-                # Exit on any status that isn't a known in-progress state
-                if status not in _NON_TERMINAL:
-                    result = session
-                    break
-
-                # Devin stays status="running" after finishing; done state is
-                # signalled by status_detail="waiting_for_user" (Devin went to sleep).
-                if detail == "waiting_for_user":
-                    print(f"[ingest] Poll #{attempt}: Devin finished (waiting_for_user)")
-                    result = session
-                    break
-
-                # Also exit early if extractable JSON appears in the response body.
-                if attempt >= 3 and _extract_json_array(session):
-                    print(f"[ingest] Poll #{attempt}: JSON found in response, exiting early")
-                    result = session
-                    break
-        except requests.exceptions.RequestException as e:
-            print(f"[ingest] Poll #{attempt}: {e}")
-        time.sleep(POLL_INTERVAL)
+    result = devin_client.poll_until_done(
+        session_id,
+        timeout=INGEST_TIMEOUT,
+        poll_interval=POLL_INTERVAL,
+        label="ingest",
+    )
 
     if not result:
         return {"status": "error", "session_id": session_id, "session_url": session_url,
@@ -293,10 +242,12 @@ def ingest_issues_with_devin(raw_issues: list) -> dict:
                 "error": f"Timed out after {INGEST_TIMEOUT // 60} min. Session: {session_url}"}
 
     # Extract JSON array from session output.
-    # First try the session data itself; if that fails, try the messages endpoint.
-    parsed = _extract_json_array(result)
+    # First try the session data itself; if that fails, fetch the paginated
+    # messages endpoint as a fallback.
+    parsed = devin_client.extract_json_array(result)
     if not parsed:
-        parsed = _fetch_and_extract_messages(session_id)
+        msgs = devin_client.fetch_messages(session_id, label="ingest")
+        parsed = devin_client.extract_json_array(result, messages=msgs)
     if not parsed:
         return {"status": "error", "session_id": session_id, "session_url": session_url,
                 "issues": [],
@@ -321,100 +272,3 @@ def ingest_issues_with_devin(raw_issues: list) -> dict:
     }
 
 
-def _extract_json_array(session_data: dict):
-    """
-    Extract a JSON array from Devin session output. Returns list or None.
-    Checks structured_output, then scans message lists under several field names,
-    then checks top-level text fields as a last resort.
-    """
-    # Try structured_output first
-    structured = session_data.get("structured_output")
-    if isinstance(structured, list) and structured:
-        return structured
-
-    # Build a flat list of message-like dicts from any message-list field
-    candidates = []
-    for msg_field in ("messages", "items", "conversation", "history"):
-        msgs = session_data.get(msg_field) or []
-        if isinstance(msgs, list):
-            candidates.extend(msgs)
-
-    for message in reversed(candidates):
-        if not isinstance(message, dict):
-            continue
-        # Devin v3 may use "content", "message", "text", or "body"
-        for content_field in ("content", "message", "text", "body"):
-            content = message.get(content_field, "")
-            if not content or not isinstance(content, str):
-                continue
-            try:
-                parsed = json.loads(content.strip())
-                if isinstance(parsed, list):
-                    return parsed
-            except (json.JSONDecodeError, AttributeError):
-                pass
-            start = content.find("[")
-            end   = content.rfind("]") + 1
-            if start >= 0 and end > start:
-                try:
-                    parsed = json.loads(content[start:end])
-                    if isinstance(parsed, list):
-                        return parsed
-                except json.JSONDecodeError:
-                    pass
-
-    # Last resort: check top-level string fields (output, result, response, etc.)
-    for field in ("output", "result", "response", "output_text", "last_message"):
-        val = session_data.get(field)
-        if not val or not isinstance(val, str):
-            continue
-        try:
-            parsed = json.loads(val.strip())
-            if isinstance(parsed, list):
-                return parsed
-        except (json.JSONDecodeError, AttributeError):
-            pass
-        start = val.find("[")
-        end   = val.rfind("]") + 1
-        if start >= 0 and end > start:
-            try:
-                parsed = json.loads(val[start:end])
-                if isinstance(parsed, list):
-                    return parsed
-            except json.JSONDecodeError:
-                pass
-
-    return None
-
-
-def _fetch_and_extract_messages(session_id: str):
-    """
-    Fallback: fetch session messages from the Devin messages endpoint and
-    scan them for a JSON array. Returns list or None.
-    """
-    endpoints = [
-        f"{DEVIN_API_BASE}/sessions/{session_id}/messages",
-        f"{DEVIN_API_BASE}/sessions/{session_id}?include_messages=true",
-    ]
-    for url in endpoints:
-        try:
-            r = requests.get(
-                url,
-                headers={"Authorization": f"Bearer {DEVIN_API_KEY}"},
-                timeout=15,
-            )
-            print(f"[ingest] Messages endpoint {url} → HTTP {r.status_code}")
-            if r.status_code == 200:
-                data = r.json()
-                print(f"[ingest] Messages response type={type(data).__name__} "
-                      f"keys={list(data.keys()) if isinstance(data, dict) else f'list[{len(data)}]'}")
-                if isinstance(data, list):
-                    result = _extract_json_array({"messages": data})
-                else:
-                    result = _extract_json_array(data)
-                if result:
-                    print(f"[ingest] Extracted JSON from fallback endpoint: {url}")
-                    return result
-        except requests.exceptions.RequestException as e:
-            print(f"[ingest] Messages endpoint {url} → error: {e}")
-    return None
