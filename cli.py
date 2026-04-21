@@ -123,7 +123,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
         return 0
 
     strategy = get_strategy(BALANCED_INTENT)
-    planned = plan_issues(ingested, strategy=strategy)
+    # Suppress in-planner notifications — cmd_notify is the dedicated
+    # notification step in the scheduler pipeline and will fire approval
+    # reminders for any recommended issues.
+    planned = plan_issues(ingested, strategy=strategy, notify=False)
     _persist_planned(planned)
 
     recommended = [p for p in planned if p["planner_score"]["recommended"]]
