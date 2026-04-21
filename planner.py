@@ -316,6 +316,14 @@ def migrate_legacy_score(planner_score: dict) -> dict:
     planner_score.setdefault("recommended", False)
     planner_score.setdefault("recommendation_reason", "")
     planner_score.setdefault("priority_rank", 0)
+
+    # Legacy 4-dim keys are still read by the old UI card rendering path via
+    # direct [] access. Populate from the new fields so a minimal or corrupt
+    # stored dict can still be rendered without KeyError during rollout.
+    planner_score.setdefault("user_impact", planner_score["severity"])
+    planner_score.setdefault("business_impact", planner_score["business_value"])
+    planner_score.setdefault("effort", _clamp(10 - planner_score["ease"]))
+    planner_score.setdefault("confidence", 4)
     return planner_score
 
 

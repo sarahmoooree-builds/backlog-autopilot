@@ -406,10 +406,17 @@ class TestMigrateLegacyScore:
 
     def test_empty_dict_becomes_defaults(self):
         migrated = migrate_legacy_score({})
-        for k in ("severity", "reach", "business_value", "ease",
-                  "urgency", "tier", "tier_reason", "score_within_tier",
-                  "total_score", "recommended", "recommendation_reason",
-                  "priority_rank"):
+        expected_keys = (
+            # new 6-dim
+            "severity", "reach", "business_value", "ease", "confidence", "urgency",
+            # tier policy
+            "tier", "tier_reason", "score_within_tier",
+            # legacy meta
+            "total_score", "recommended", "recommendation_reason", "priority_rank",
+            # legacy dimension keys still read by the old UI card path
+            "user_impact", "business_impact", "effort",
+        )
+        for k in expected_keys:
             assert k in migrated, f"missing {k}"
 
     def test_migrated_dict_is_sortable_by_total_score(self):

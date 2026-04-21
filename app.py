@@ -157,7 +157,17 @@ def load_and_plan(intent: str, ingest_mode: str, planner_mode: str):
                 rec["planner_score"] = migrate_legacy_score(
                     rec.get("planner_score", {}) or {}
                 )
-            return sorted(records, key=lambda x: x["planner_score"]["total_score"], reverse=True)
+            # Match the rule-based path: tier ascending (T1 first), then
+            # score_within_tier descending. Sorting by total_score alone would
+            # mix legacy tier-3 records (preserved raw score) above new tier-1
+            # records whose total_score is derived from (tier, score_within_tier).
+            return sorted(
+                records,
+                key=lambda x: (
+                    x["planner_score"]["tier"],
+                    -x["planner_score"]["score_within_tier"],
+                ),
+            )
 
     if ingest_mode == "devin":
         ingested = store.all_records("ingested")
