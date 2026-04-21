@@ -61,14 +61,25 @@ def sample_planned_issue(sample_ingested_issue) -> dict:
     return {
         **sample_ingested_issue,
         "planner_score": {
+            # 6-dim enriched scores
+            "severity": 7,
+            "reach": 5,
+            "business_value": 6,
+            "ease": 9,
+            "confidence": 10,
+            "urgency": 4,
+            # Tier policy output
+            "tier": 1,
+            "tier_reason": "Bug with SLA label",
+            "score_within_tier": 8.5,
+            # Legacy fields kept for backward compat during rollout
+            "total_score": 8.5,
+            "recommended": True,
+            "recommendation_reason": "Critical priority — good automation candidate",
+            "priority_rank": 1,
             "user_impact": 7,
             "business_impact": 6,
-            "effort": 2,
-            "confidence": 10,
-            "total_score": 7.8,
-            "recommended": True,
-            "recommendation_reason": "Score 7.8/10 — good automation candidate",
-            "priority_rank": 1,
+            "effort": 1,
         },
         "implementation_options": [
             "Locate and patch the defect directly in the relevant module.",
