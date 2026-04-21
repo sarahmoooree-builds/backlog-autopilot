@@ -1,30 +1,66 @@
-"""
-config.py — shared HTTP session with retry logic.
+"""config.py — Central configuration for Backlog Autopilot
 
-Every Devin API and GitHub API call in this project goes through the
-shared `SESSION` exported here. The session is configured with urllib3's
-`Retry` so transient failures (429, 5xx, connection drops) are retried
-automatically with exponential backoff instead of surfacing as fire-once
-errors to the caller.
+All infrastructure-level settings (credentials, timeouts, the target repo) are
+loaded from environment variables here so every stage of the pipeline reads
+from a single source of truth. PM-tunable scoring parameters (e.g. weights,
+thresholds) live with the domain logic in `planner.py`, not here.
 
-urllib3 logs retry attempts at DEBUG level, so enabling DEBUG logging on
-the `urllib3.connectionpool` logger (or the root logger) will surface
-the retry activity for debugging.
+This module also exports a shared ``SESSION`` — a ``requests.Session`` pre-
+configured with urllib3's ``Retry`` so every Devin and GitHub API call in the
+pipeline retries transient 429/5xx failures and connection drops instead of
+surfacing them as fire-once errors. urllib3 emits retry attempts at DEBUG
+level on ``urllib3.connectionpool`` / ``urllib3.util.retry``, so enabling
+DEBUG logging there will surface retry activity automatically.
 """
+
+import os
 
 import requests
+from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+load_dotenv()
+
+# GitHub
+TARGET_REPO = os.getenv("TARGET_REPO", "sarahmoooree-builds/finserv-platform")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+
+# Devin API
+DEVIN_API_KEY = os.getenv("DEVIN_API_KEY")
+DEVIN_ORG_ID = os.getenv("DEVIN_ORG_ID")
+DEVIN_API_BASE = f"https://api.devin.ai/v3/organizations/{DEVIN_ORG_ID}"
+
+# Timeouts (seconds)
+INGEST_TIMEOUT = int(os.getenv("INGEST_TIMEOUT", "480"))
+PLANNER_TIMEOUT = int(os.getenv("PLANNER_TIMEOUT", "480"))
+SCOPE_TIMEOUT = int(os.getenv("SCOPE_TIMEOUT", "360"))
+OPTIMIZER_TIMEOUT = int(os.getenv("OPTIMIZER_TIMEOUT", "480"))
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
+
+# Concurrency
+DEVIN_MAX_CONCURRENT_SESSIONS = int(os.getenv("DEVIN_MAX_CONCURRENT_SESSIONS", "5"))
+
+
+# ---------------------------------------------------------------------------
+# Shared HTTP session with automatic retry on transient failures
+# ---------------------------------------------------------------------------
 
 def _build_session() -> requests.Session:
-    """Build a requests.Session with retries on transient HTTP failures."""
+    """Build a requests.Session with retries on transient HTTP failures.
+
+    Only idempotent methods are retried. POST is intentionally excluded
+    because every POST in this project creates a Devin session at
+    ``/sessions`` — an auto-retry on a 5xx / 429 / dropped connection
+    would create duplicate sessions on the server, leaving the first one
+    orphaned and running autonomously against the target repo.
+    """
     s = requests.Session()
     retry = Retry(
         total=3,
         backoff_factor=1,  # 1s, 2s, 4s between retries
         status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET", "POST"],
+        allowed_methods=["GET"],
     )
     adapter = HTTPAdapter(max_retries=retry)
     s.mount("https://", adapter)

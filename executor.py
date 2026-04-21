@@ -12,21 +12,12 @@ instead of guessing.
 Requires a complete ScopePlan in the store before dispatching.
 """
 
-import os
 import requests
 from datetime import datetime
-from dotenv import load_dotenv
 
 import store
-from config import SESSION
+from config import DEVIN_API_BASE, DEVIN_API_KEY, SESSION, TARGET_REPO
 from prompts import EXECUTION_PROMPT
-
-load_dotenv()
-DEVIN_API_KEY = os.getenv("DEVIN_API_KEY")
-DEVIN_ORG_ID = os.getenv("DEVIN_ORG_ID")
-
-TARGET_REPO = "sarahmoooree-builds/finserv-platform"
-DEVIN_API_BASE = f"https://api.devin.ai/v3/organizations/{DEVIN_ORG_ID}"
 
 
 def execute_issues(planned_issues: list) -> list:

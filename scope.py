@@ -17,25 +17,20 @@ Output is saved to store.py (scope_plans section).
 """
 
 import json
-import os
 import time
 import requests
 from datetime import datetime
-from dotenv import load_dotenv
 
 import store
-from config import SESSION
+from config import (
+    DEVIN_API_BASE,
+    DEVIN_API_KEY,
+    POLL_INTERVAL,
+    SCOPE_TIMEOUT,
+    SESSION,
+    TARGET_REPO,
+)
 from prompts import SCOPE_PROMPT
-
-load_dotenv()
-DEVIN_API_KEY = os.getenv("DEVIN_API_KEY")
-DEVIN_ORG_ID = os.getenv("DEVIN_ORG_ID")
-
-TARGET_REPO = "sarahmoooree-builds/finserv-platform"
-DEVIN_API_BASE = f"https://api.devin.ai/v3/organizations/{DEVIN_ORG_ID}"
-
-SCOPE_TIMEOUT = 360   # seconds — Devin needs 4–6 minutes to read the codebase
-POLL_INTERVAL = 10    # seconds between status polls
 
 
 def scope_issue(planned_issue: dict) -> dict:
