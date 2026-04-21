@@ -704,6 +704,17 @@ def _normalise_devin_record(
         accuracy = "accurate"
 
     status = devin_rec.get("actual_status") or execution.get("status", "")
+    # Normalise to the title-case vocabulary used by the Executor
+    # ("Completed", "Blocked", "Awaiting Review"). Downstream summary metrics
+    # (completion_rate, blocked_rate) and pattern detection do exact-match
+    # comparisons, so accept any casing Devin may emit.
+    _STATUS_ALIASES = {
+        "completed": "Completed",
+        "blocked": "Blocked",
+        "awaiting review": "Awaiting Review",
+    }
+    if status:
+        status = _STATUS_ALIASES.get(status.strip().lower(), status)
     failure_cause = devin_rec.get("failure_root_cause")
     if status != "Blocked":
         failure_cause = None
