@@ -492,58 +492,55 @@ with tab_pipeline:
     # AI Analysis panel (Stages 1 + 2 combined)
     # -----------------------------------------------------------------------
 
-    with st.container(border=True):
-        hcol, bcol = st.columns([5, 5])
-        with hcol:
-            st.markdown("**AI analysis**")
-            st.caption(
-                "Devin normalises messy GitHub labels and ranks issues with business "
-                "reasoning — in a single session."
+    analysis_meta = get_pipeline_meta("ingest")
+    left_col, right_col = st.columns([7, 3])
+    if ingest_mode == "devin" and analysis_meta:
+        total_count = analysis_meta.get("issue_count", len(planned_issues))
+        rec_count = len(auto_recommended)
+        ran_date = analysis_meta.get("ran_at", "")[:10]
+        with left_col:
+            st.markdown(
+                f"**Devin-analysed** · {total_count} issues · "
+                f"{rec_count} recommended · {ran_date}"
             )
-        with bcol:
-            analysis_meta = get_pipeline_meta("ingest")
-            if ingest_mode == "devin" and analysis_meta:
-                st.success("Devin-powered")
-                rec_count = len(auto_recommended)
-                total_count = analysis_meta.get("issue_count", len(planned_issues))
-                st.caption(
-                    f"{total_count} issues analysed · {rec_count} recommended · "
-                    f"{analysis_meta.get('ran_at', '')[:10]}"
-                )
+        with right_col:
+            link_col, btn_col = st.columns(2)
+            with link_col:
                 if analysis_meta.get("session_url"):
-                    st.markdown(f"[View Devin session →]({analysis_meta['session_url']})")
-                if st.button("Clear → use rule-based", key="clear_analysis_devin"):
+                    st.markdown(f"[View session ↗]({analysis_meta['session_url']})")
+            with btn_col:
+                if st.button("Reset to rule-based", key="clear_analysis_devin"):
                     clear_pipeline_meta("ingest")
                     clear_pipeline_meta("planner")
                     load_and_plan.clear()
                     st.rerun()
-            else:
-                st.info("Rule-based (instant · steered by the prioritization goal above)")
-                if st.button("Run AI analysis with Devin", key="run_analysis_devin",
-                             help="One Devin session normalises labels AND ranks by business impact (~5 min)"):
-                    with st.spinner("Devin is analysing issues… (~5 min)"):
-                        raw = fetch_issues()
-                        result = analyse_issues_with_devin(raw)
-                    if result["status"] == "complete":
-                        for issue in result["issues"]:
-                            store.set_ingested(issue["id"], issue)
-                            store.set_planned(issue["id"], issue)
-                        now = datetime.now().isoformat()
-                        meta = {
-                            "status":      "complete",
-                            "session_id":  result["session_id"],
-                            "session_url": result["session_url"],
-                            "ran_at":      now,
-                            "issue_count": len(result["issues"]),
-                        }
-                        set_pipeline_meta("ingest",  meta)
-                        set_pipeline_meta("planner", meta)
-                        load_and_plan.clear()
-                        st.rerun()
-                    else:
-                        st.error(f"Analysis failed: {result.get('error', 'Unknown error')}")
-
-    st.markdown("")
+    else:
+        with left_col:
+            st.caption("Rule-based ranking · steered by the goal above")
+        with right_col:
+            if st.button("Enhance with Devin AI", key="run_analysis_devin", type="primary",
+                         help="One Devin session normalises labels AND ranks by business impact (~5 min)"):
+                with st.spinner("Devin is analysing issues… (~5 min)"):
+                    raw = fetch_issues()
+                    result = analyse_issues_with_devin(raw)
+                if result["status"] == "complete":
+                    for issue in result["issues"]:
+                        store.set_ingested(issue["id"], issue)
+                        store.set_planned(issue["id"], issue)
+                    now = datetime.now().isoformat()
+                    meta = {
+                        "status":      "complete",
+                        "session_id":  result["session_id"],
+                        "session_url": result["session_url"],
+                        "ran_at":      now,
+                        "issue_count": len(result["issues"]),
+                    }
+                    set_pipeline_meta("ingest",  meta)
+                    set_pipeline_meta("planner", meta)
+                    load_and_plan.clear()
+                    st.rerun()
+                else:
+                    st.error(f"Analysis failed: {result.get('error', 'Unknown error')}")
 
     # -----------------------------------------------------------------------
     # Unified issue list
