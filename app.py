@@ -587,6 +587,28 @@ with tab_pipeline:
     currently_selected = st.session_state.selected_ids & selectable_ids
 
     # --- Action row ---
+    # Emit the styled-CTA CSS once *before* the columns so it doesn't inject
+    # an invisible markdown element inside column 3/4 that pushes those
+    # buttons a few pixels below the plain buttons in columns 1/2.
+    # Scoped via the buttons' st-key classes so it doesn't leak into the
+    # goal selector row (also a 4-column row).
+    st.markdown(
+        """<style>
+        .st-key-scope_selected_cta button {
+            background-color: #1B7A8E; color: white; border: none;
+        }
+        .st-key-scope_selected_cta button:hover {
+            background-color: #145c6b; color: white; border: none;
+        }
+        .st-key-run_execution_cta button {
+            background-color: #28a745; color: white; border: none;
+        }
+        .st-key-run_execution_cta button:hover {
+            background-color: #218838; color: white; border: none;
+        }
+        </style>""",
+        unsafe_allow_html=True,
+    )
     a1, a2, a3, a4 = st.columns([2.0, 2.2, 2.2, 3.6])
 
     with a1:
@@ -625,21 +647,6 @@ with tab_pipeline:
             and derive_status(i["id"]) == "not_scoped"
         ]
         scope_label = "Scope selected issues"
-        # Scope the action-row styling via the button's own st-key class so
-        # it doesn't leak into any other 4-column row on the page (the goal
-        # selector at app.py:424 is also st.columns(4); :nth-child(3) used
-        # to paint the 3rd goal button teal).
-        st.markdown(
-            """<style>
-            .st-key-scope_selected_cta button {
-                background-color: #1B7A8E; color: white; border: none;
-            }
-            .st-key-scope_selected_cta button:hover {
-                background-color: #145c6b; color: white; border: none;
-            }
-            </style>""",
-            unsafe_allow_html=True,
-        )
         if st.button(scope_label, disabled=len(to_scope) == 0, key="scope_selected_cta"):
             try:
                 with st.spinner(
@@ -673,18 +680,6 @@ with tab_pipeline:
             and not store.is_dispatched(i["id"])
         ]
         run_label = f"Run execution ({len(to_run)})" if to_run else "Run execution"
-        # Same scoping fix as scope_selected_cta above — see comment there.
-        st.markdown(
-            """<style>
-            .st-key-run_execution_cta button {
-                background-color: #28a745; color: white; border: none;
-            }
-            .st-key-run_execution_cta button:hover {
-                background-color: #218838; color: white; border: none;
-            }
-            </style>""",
-            unsafe_allow_html=True,
-        )
         if st.button(run_label, disabled=len(to_run) == 0, key="run_execution_cta"):
             with st.spinner("Dispatching to Devin Executor…"):
                 execute_issues(to_run)
