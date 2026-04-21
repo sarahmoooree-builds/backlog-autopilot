@@ -1,10 +1,10 @@
 """
-architect.py — Stage 3: Architect
+scope.py — Stage 3: Scope (formerly "Architect")
 
 Converts Planner-approved issues into technical implementation plans by
 dispatching a Devin session that reads the finserv-platform codebase.
 
-The Architect decides HOW to build each approved issue. It produces:
+The Scope stage decides HOW to build each approved issue. It produces:
   - Confidence score and reasoning
   - Root cause hypothesis (specific file / function / line)
   - Affected files (confirmed in the repo by Devin)
@@ -12,8 +12,8 @@ The Architect decides HOW to build each approved issue. It produces:
   - Ordered task breakdown (ready for the Executor to follow)
   - Dependencies and risks
 
-The Architect does NOT write code or open PRs.
-Output is saved to store.py (architect_plans section).
+It does NOT write code or open PRs.
+Output is saved to store.py (scope_plans section).
 """
 
 import json
@@ -24,7 +24,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 import store
-from prompts import ARCHITECT_PROMPT
+from prompts import SCOPE_PROMPT
 
 load_dotenv()
 DEVIN_API_KEY = os.getenv("DEVIN_API_KEY")
@@ -33,31 +33,31 @@ DEVIN_ORG_ID = os.getenv("DEVIN_ORG_ID")
 TARGET_REPO = "sarahmoooree-builds/finserv-platform"
 DEVIN_API_BASE = f"https://api.devin.ai/v3/organizations/{DEVIN_ORG_ID}"
 
-ARCHITECT_TIMEOUT = 360   # seconds — Devin needs 4–6 minutes to read the codebase
-POLL_INTERVAL = 10        # seconds between status polls
+SCOPE_TIMEOUT = 360   # seconds — Devin needs 4–6 minutes to read the codebase
+POLL_INTERVAL = 10    # seconds between status polls
 
 
-def architect_issue(planned_issue: dict) -> dict:
+def scope_issue(planned_issue: dict) -> dict:
     """
-    Run a Devin architect session for a single planned issue.
+    Run a Devin scoping session for a single planned issue.
 
     Creates a Devin session, saves a pending record immediately so the UI
     shows progress, polls until finished, extracts the JSON plan, and saves
     the result to the store — including on failure, so the UI always shows
     something after this call returns.
 
-    Returns the ArchitectPlan dict (may contain architect_status="error" on failure).
+    Returns the ScopePlan dict (may contain scope_status="error" on failure).
     """
     issue_id = planned_issue["id"]
-    prompt = _build_architect_prompt(planned_issue)
+    prompt = _build_scope_prompt(planned_issue)
 
     headers = {
         "Authorization": f"Bearer {DEVIN_API_KEY}",
         "Content-Type": "application/json",
     }
 
-    # --- Step 1: Create the architect session ---
-    print(f"[architect] Creating Devin session for issue #{issue_id}...")
+    # --- Step 1: Create the scope session ---
+    print(f"[scope] Creating Devin session for issue #{issue_id}...")
     try:
         response = requests.post(
             f"{DEVIN_API_BASE}/sessions",
@@ -67,12 +67,12 @@ def architect_issue(planned_issue: dict) -> dict:
         )
     except requests.exceptions.RequestException as e:
         err = _error_plan(issue_id, "", f"Could not reach Devin API: {str(e)}")
-        store.set_architect_plan(issue_id, err)
+        store.set_scope_plan(issue_id, err)
         return err
 
     if response.status_code not in (200, 201):
         err = _error_plan(issue_id, "", f"API returned {response.status_code}: {response.text[:200]}")
-        store.set_architect_plan(issue_id, err)
+        store.set_scope_plan(issue_id, err)
         return err
 
     session_data = response.json()
@@ -81,14 +81,14 @@ def architect_issue(planned_issue: dict) -> dict:
 
     if not session_id:
         err = _error_plan(issue_id, "", "No session_id returned from Devin API")
-        store.set_architect_plan(issue_id, err)
+        store.set_scope_plan(issue_id, err)
         return err
 
-    print(f"[architect] Session created: {session_url}")
+    print(f"[scope] Session created: {session_url}")
 
     # --- Step 2: Save pending state immediately so UI shows progress ---
     pending = _pending_plan(issue_id, session_id, session_url)
-    store.set_architect_plan(issue_id, pending)
+    store.set_scope_plan(issue_id, pending)
 
     # --- Step 3: Poll until finished ---
     result = _poll_until_done(session_id, headers)
@@ -96,57 +96,55 @@ def architect_issue(planned_issue: dict) -> dict:
     if not result:
         err = _error_plan(
             issue_id, session_url,
-            f"Devin session timed out after {ARCHITECT_TIMEOUT // 60} minutes. "
+            f"Devin session timed out after {SCOPE_TIMEOUT // 60} minutes. "
             f"Session: {session_url}"
         )
         err["session_id"] = session_id
-        store.set_architect_plan(issue_id, err)
+        store.set_scope_plan(issue_id, err)
         return err
 
-    # --- Step 4: Extract and save the architect JSON ---
-    # Attempt extraction before checking for "blocked" — Devin often outputs
-    # the full plan and then waits for further instructions ("blocked" in the API).
-    plan_data = _extract_architect_json(result)
+    # --- Step 4: Extract and save the scope JSON ---
+    plan_data = _extract_scope_json(result)
 
     if not plan_data:
         final_status = result.get("status", "").lower()
         detail = " (session awaiting further instructions)" if final_status == "blocked" else ""
         err = _error_plan(
             issue_id, session_url,
-            f"Devin finished but architect JSON could not be parsed{detail}. Session: {session_url}"
+            f"Devin finished but scope JSON could not be parsed{detail}. Session: {session_url}"
         )
         err["session_id"] = session_id
-        store.set_architect_plan(issue_id, err)
+        store.set_scope_plan(issue_id, err)
         return err
 
-    architect_plan = {
+    scope_plan = {
         "issue_id": issue_id,
         **plan_data,
         "session_id": session_id,
         "session_url": session_url,
-        "architect_status": "complete",
+        "scope_status": "complete",
         "error": None,
-        "architected_at": datetime.now().isoformat(),
+        "scoped_at": datetime.now().isoformat(),
     }
-    store.set_architect_plan(issue_id, architect_plan)
-    print(f"[architect] Issue #{issue_id} architected. "
+    store.set_scope_plan(issue_id, scope_plan)
+    print(f"[scope] Issue #{issue_id} scoped. "
           f"Confidence: {plan_data.get('confidence_score')}/100")
-    return architect_plan
+    return scope_plan
 
 
-def architect_issues(planned_issues: list) -> dict:
+def scope_issues(planned_issues: list) -> dict:
     """
-    Run the Architect on a list of planned issues.
-    Skips issues that already have a complete architect plan.
-    Returns a dict of {issue_id: ArchitectPlan}.
+    Run scoping on a list of planned issues.
+    Skips issues that already have a complete scope plan.
+    Returns a dict of {issue_id: ScopePlan}.
     """
     results = {}
     for issue in planned_issues:
-        existing = store.get_architect_plan(issue["id"])
-        if existing and existing.get("architect_status") == "complete":
+        existing = store.get_scope_plan(issue["id"])
+        if existing and existing.get("scope_status") == "complete":
             results[issue["id"]] = existing
             continue
-        results[issue["id"]] = architect_issue(issue)
+        results[issue["id"]] = scope_issue(issue)
     return results
 
 
@@ -154,13 +152,12 @@ def architect_issues(planned_issues: list) -> dict:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _build_architect_prompt(planned_issue: dict) -> str:
-    """Build the architect prompt from the ARCHITECT_PROMPT template."""
-    score = planned_issue.get("planner_score", {})
+def _build_scope_prompt(planned_issue: dict) -> str:
+    """Build the scope prompt from the SCOPE_PROMPT template."""
     options = planned_issue.get("implementation_options", [])
     return (
         f"Work on the GitHub repository https://github.com/{TARGET_REPO}.\n\n"
-        + ARCHITECT_PROMPT.format(
+        + SCOPE_PROMPT.format(
             issue_id=planned_issue["id"],
             title=planned_issue["title"],
             description=planned_issue["description"],
@@ -188,9 +185,9 @@ def _pending_plan(issue_id: int, session_id: str, session_url: str) -> dict:
         "risks": [],
         "session_id": session_id,
         "session_url": session_url,
-        "architect_status": "pending",
+        "scope_status": "pending",
         "error": None,
-        "architected_at": datetime.now().isoformat(),
+        "scoped_at": datetime.now().isoformat(),
     }
 
 
@@ -207,9 +204,9 @@ def _error_plan(issue_id: int, session_url: str, error_msg: str) -> dict:
         "risks": [],
         "session_id": "unknown",
         "session_url": session_url,
-        "architect_status": "error",
+        "scope_status": "error",
         "error": error_msg,
-        "architected_at": datetime.now().isoformat(),
+        "scoped_at": datetime.now().isoformat(),
     }
 
 
@@ -219,7 +216,7 @@ def _poll_until_done(session_id: str, headers: dict):
     or timeout. Prints status updates for visibility.
     Returns the final session dict, or None on timeout.
     """
-    deadline = time.time() + ARCHITECT_TIMEOUT
+    deadline = time.time() + SCOPE_TIMEOUT
     attempt = 0
 
     while time.time() < deadline:
@@ -234,27 +231,27 @@ def _poll_until_done(session_id: str, headers: dict):
                 session = response.json()
                 status = session.get("status", "unknown").lower()
                 detail = session.get("status_detail", "")
-                print(f"[architect] Poll #{attempt}: status={status!r} detail={detail!r}")
+                print(f"[scope] Poll #{attempt}: status={status!r} detail={detail!r}")
                 _NON_TERMINAL = ("running", "starting", "queued", "initializing", "created", "claimed")
                 if status not in _NON_TERMINAL:
                     return session
                 if detail == "waiting_for_user":
-                    print(f"[architect] Poll #{attempt}: Devin finished (waiting_for_user)")
+                    print(f"[scope] Poll #{attempt}: Devin finished (waiting_for_user)")
                     return session
             else:
-                print(f"[architect] Poll #{attempt}: HTTP {response.status_code}")
+                print(f"[scope] Poll #{attempt}: HTTP {response.status_code}")
         except requests.exceptions.RequestException as e:
-            print(f"[architect] Poll #{attempt}: request error — {e}")
+            print(f"[scope] Poll #{attempt}: request error — {e}")
 
         time.sleep(POLL_INTERVAL)
 
-    print(f"[architect] Timed out after {ARCHITECT_TIMEOUT}s ({attempt} polls)")
+    print(f"[scope] Timed out after {SCOPE_TIMEOUT}s ({attempt} polls)")
     return None
 
 
-def _extract_architect_json(session_data: dict):
+def _extract_scope_json(session_data: dict):
     """
-    Extract the structured architect JSON from the Devin session output.
+    Extract the structured scope JSON from the Devin session output.
     Checks structured_output first, then scans messages in reverse.
     Returns the parsed dict if all required fields are present, else None.
     """

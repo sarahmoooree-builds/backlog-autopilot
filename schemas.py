@@ -8,7 +8,7 @@ Pipeline:
   RawIssue → [Stage 1: Ingest] → IngestedIssue
            → [Stage 2: Planner] → PlannedIssue
            → [Checkpoint 2.5: Human Approval] → ApprovalRecord
-           → [Stage 3: Architect] → ArchitectPlan
+           → [Stage 3: Scope] → ScopePlan
            → [Checkpoint 3.5: Human Review] → ReviewRecord
            → [Stage 4: Executor] → ExecutionSession
            → [Stage 5: Optimizer] → OptimizationRecord
@@ -95,7 +95,7 @@ class PlannedIssue(TypedDict):
 
 # ---------------------------------------------------------------------------
 # Checkpoint 2.5 — Human Approval
-# Explicit approval before Architect runs.
+# Explicit approval before Scope runs.
 # ---------------------------------------------------------------------------
 
 class ApprovalRecord(TypedDict):
@@ -105,11 +105,11 @@ class ApprovalRecord(TypedDict):
 
 
 # ---------------------------------------------------------------------------
-# Stage 3 output — Architect
+# Stage 3 output — Scope (formerly "Architect")
 # Technical implementation plan. No code written.
 # ---------------------------------------------------------------------------
 
-class ArchitectPlan(TypedDict):
+class ScopePlan(TypedDict):
     issue_id: int
     confidence_score: int           # 0–100
     confidence_reasoning: str
@@ -121,9 +121,13 @@ class ArchitectPlan(TypedDict):
     risks: list                     # edge cases, blast radius notes
     session_id: str
     session_url: str
-    architect_status: str           # "pending" | "complete" | "error"
+    scope_status: str               # "pending" | "complete" | "error"
     error: Optional[str]
-    architected_at: str
+    scoped_at: str
+
+
+# Backwards-compatible alias — the old name was ArchitectPlan.
+ArchitectPlan = ScopePlan
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +145,7 @@ class ReviewRecord(TypedDict):
 # ---------------------------------------------------------------------------
 # Stage 4 output — Executor
 # Tracks a Devin implementation session.
-# Carries Architect estimates so the Optimizer can diff them.
+# Carries Scope estimates so the Optimizer can diff them.
 # ---------------------------------------------------------------------------
 
 class ExecutionSession(TypedDict):
@@ -153,7 +157,7 @@ class ExecutionSession(TypedDict):
     pull_requests: list             # [{number, title, url}]
     dispatched_at: str
     completed_at: Optional[str]
-    # Copied from ArchitectPlan at dispatch time for Optimizer comparison
+    # Copied from ScopePlan at dispatch time for Optimizer comparison
     estimated_lines_changed: int
     estimated_files: list
 
@@ -166,7 +170,7 @@ class ExecutionSession(TypedDict):
 class OptimizationRecord(TypedDict):
     issue_id: int
     planned_score: dict             # PlannerScore snapshot
-    architect_confidence: int       # confidence_score from ArchitectPlan
+    scope_confidence: int           # confidence_score from ScopePlan
     actual_status: str              # terminal ExecutionSession status
     actual_pr_count: int
     estimation_accuracy: str        # "over" | "under" | "accurate"

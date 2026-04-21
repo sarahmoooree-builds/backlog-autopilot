@@ -1,15 +1,15 @@
 """
 executor.py — Stage 4: Executor
 
-Sends Architect-approved issues to Devin for autonomous implementation.
-The Executor follows the Architect's plan — it does not invent strategy or
+Sends Scope-approved issues to Devin for autonomous implementation.
+The Executor follows the Scope plan — it does not invent strategy or
 prioritisation.
 
 For high-confidence, well-scoped issues: Devin implements, tests, and opens a PR.
 For lower-confidence issues blocked during execution: Devin reports the blocker
 instead of guessing.
 
-Requires a complete ArchitectPlan in the store before dispatching.
+Requires a complete ScopePlan in the store before dispatching.
 """
 
 import os
@@ -30,9 +30,9 @@ DEVIN_API_BASE = f"https://api.devin.ai/v3/organizations/{DEVIN_ORG_ID}"
 
 def execute_issues(planned_issues: list) -> list:
     """
-    Send each approved, architected issue to Devin as a new execution session.
+    Send each approved, scoped issue to Devin as a new execution session.
     Skips issues that are already dispatched (duplicate prevention).
-    Skips issues that have no complete ArchitectPlan (logged as a warning).
+    Skips issues that have no complete ScopePlan (logged as a warning).
 
     Returns a list of result dicts for display in the UI.
     """
@@ -54,21 +54,21 @@ def execute_issues(planned_issues: list) -> list:
             })
             continue
 
-        # Require a complete ArchitectPlan before dispatching
-        architect_plan = store.get_architect_plan(issue_id)
-        if not architect_plan or architect_plan.get("architect_status") != "complete":
-            print(f"[executor] Skipping issue #{issue_id} — no complete Architect plan found.")
+        # Require a complete ScopePlan before dispatching
+        scope_plan = store.get_scope_plan(issue_id)
+        if not scope_plan or scope_plan.get("scope_status") != "complete":
+            print(f"[executor] Skipping issue #{issue_id} — no complete Scope plan found.")
             results.append({
                 "id": issue_id,
                 "title": issue["title"],
                 "status": "Blocked",
-                "outcome_summary": "Cannot dispatch: Architect plan is missing or incomplete.",
+                "outcome_summary": "Cannot dispatch: Scope plan is missing or incomplete.",
                 "session_url": None,
                 "already_dispatched": False,
             })
             continue
 
-        result = _create_devin_session(issue, architect_plan)
+        result = _create_devin_session(issue, scope_plan)
         results.append(result)
 
     return results
@@ -117,19 +117,19 @@ def refresh_session_statuses() -> list:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _build_prompt(planned_issue: dict, architect_plan: dict) -> str:
+def _build_prompt(planned_issue: dict, scope_plan: dict) -> str:
     """
-    Fill in the EXECUTION_PROMPT with both planned issue data and the Architect Plan.
+    Fill in the EXECUTION_PROMPT with both planned issue data and the Scope Plan.
     Prefixes with repo context so Devin knows where to work.
     """
     task_breakdown = "\n".join(
-        f"{i+1}. {t}" for i, t in enumerate(architect_plan.get("task_breakdown", []))
+        f"{i+1}. {t}" for i, t in enumerate(scope_plan.get("task_breakdown", []))
     )
     affected_files = "\n".join(
-        f"- {f}" for f in architect_plan.get("affected_files", [])
+        f"- {f}" for f in scope_plan.get("affected_files", [])
     )
     risks = "\n".join(
-        f"- {r}" for r in architect_plan.get("risks", [])
+        f"- {r}" for r in scope_plan.get("risks", [])
     ) or "None identified."
 
     task_prompt = EXECUTION_PROMPT.format(
@@ -141,22 +141,22 @@ def _build_prompt(planned_issue: dict, architect_plan: dict) -> str:
         complexity=planned_issue.get("complexity", "unknown"),
         scope=planned_issue.get("scope", "unknown"),
         summary=planned_issue.get("summary", planned_issue["title"]),
-        root_cause=architect_plan.get("root_cause_hypothesis", "See session for details."),
-        affected_files=affected_files or "- See Architect session for details.",
-        task_breakdown=task_breakdown or "1. Implement the fix per the Architect session.",
-        architect_confidence=architect_plan.get("confidence_score", 0),
+        root_cause=scope_plan.get("root_cause_hypothesis", "See session for details."),
+        affected_files=affected_files or "- See Scope session for details.",
+        task_breakdown=task_breakdown or "1. Implement the fix per the Scope session.",
+        scope_confidence=scope_plan.get("confidence_score", 0),
         risks=risks,
     )
     return f"Work on the GitHub repository https://github.com/{TARGET_REPO}.\n\n{task_prompt}"
 
 
-def _create_devin_session(planned_issue: dict, architect_plan: dict) -> dict:
+def _create_devin_session(planned_issue: dict, scope_plan: dict) -> dict:
     """
     Create a Devin execution session for a single issue.
-    Copies Architect estimates into the ExecutionSession for Optimizer comparison.
+    Copies Scope estimates into the ExecutionSession for Optimizer comparison.
     """
     issue_id = planned_issue["id"]
-    prompt = _build_prompt(planned_issue, architect_plan)
+    prompt = _build_prompt(planned_issue, scope_plan)
 
     headers = {
         "Authorization": f"Bearer {DEVIN_API_KEY}",
@@ -178,10 +178,10 @@ def _create_devin_session(planned_issue: dict, architect_plan: dict) -> dict:
             status = "In Progress"
             outcome = (
                 f"Devin session created. Session ID: {session_id}. "
-                f"Devin is implementing the Architect plan against {TARGET_REPO}."
+                f"Devin is implementing the Scope plan against {TARGET_REPO}."
             )
 
-            # Save to persistent store, carrying Architect estimates for Optimizer
+            # Save to persistent store, carrying Scope estimates for Optimizer
             store.set_execution(issue_id, {
                 "issue_id": issue_id,
                 "session_id": session_id,
@@ -191,8 +191,8 @@ def _create_devin_session(planned_issue: dict, architect_plan: dict) -> dict:
                 "pull_requests": [],
                 "dispatched_at": datetime.now().isoformat(),
                 "completed_at": None,
-                "estimated_lines_changed": architect_plan.get("estimated_lines_changed", 0),
-                "estimated_files": architect_plan.get("affected_files", []),
+                "estimated_lines_changed": scope_plan.get("estimated_lines_changed", 0),
+                "estimated_files": scope_plan.get("affected_files", []),
             })
 
             return {

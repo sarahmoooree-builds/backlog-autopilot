@@ -6,7 +6,7 @@ dimension priority score, a recommendation flag, and lightweight implementation
 options.
 
 Does NOT call Devin. Does NOT write code. Does NOT open sessions.
-The Planner decides WHAT to work on. The Architect decides HOW to build it.
+The Planner decides WHAT to work on. The Scope stage decides HOW to build it.
 
 Output: list[PlannedIssue] sorted by total_score descending (rank 1 = best)
 """
@@ -192,7 +192,7 @@ def compute_total_score(scores: dict, weights: dict) -> float:
 def generate_implementation_options(issue: dict) -> list:
     """
     Suggest 1–3 plain-English implementation options.
-    Rule-based, no code. The Architect will refine these into a build plan.
+    Rule-based, no code. The Scope stage will refine these into a build plan.
     """
     issue_type = issue.get("issue_type", "other")
     complexity = issue.get("complexity", "medium")

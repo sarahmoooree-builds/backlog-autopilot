@@ -6,30 +6,41 @@ app.py — Backlog Autopilot: Streamlit UI
 Stages:
   1. Ingest   — normalise and classify GitHub issues
   2. Planner  — rank and prioritise using PM-configurable weights
-  2.5 Human Approval checkpoint
-  3. Architect — technical implementation plans via Devin
-  3.5 Human Review checkpoint (for low-confidence plans)
+  2.5 Human approval (select & scope)
+  3. Scope    — technical implementation plans via Devin
+  3.5 Human review (for low-confidence scope plans)
   4. Executor — Devin implements the plan and opens PRs
   5. Optimizer — compare estimated vs. actual, surface patterns
 
 Run with: streamlit run app.py
 """
 
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+
 import altair as alt
 import pandas as pd
 import streamlit as st
-from datetime import datetime
 
-from github_client import fetch_issues, fetch_pull_requests
+from github_client import (
+    fetch_issues,
+    fetch_pull_requests,
+    fetch_closed_issues,
+    fetch_merged_prs,
+)
 from ingest import ingest_issues
 from planner import plan_issues, analyse_issues_with_devin, DEFAULT_WEIGHTS
-from architect import architect_issue, architect_issues
+from scope import scope_issue, scope_issues
 from executor import execute_issues, refresh_session_statuses
 from optimizer import run_optimizer, get_optimizer_summary
 import store
 from store import (
-    migrate_legacy_stores, confidence_label, all_optimizations,
-    get_pipeline_meta, set_pipeline_meta, clear_pipeline_meta,
+    migrate_legacy_stores,
+    confidence_label,
+    all_optimizations,
+    get_pipeline_meta,
+    set_pipeline_meta,
+    clear_pipeline_meta,
 )
 
 
@@ -52,6 +63,43 @@ st.set_page_config(
 
 
 # ---------------------------------------------------------------------------
+# Global style — tighter hierarchy, subtle dividers, consistent badges
+# ---------------------------------------------------------------------------
+
+st.markdown(
+    """
+    <style>
+      /* Status badges */
+      .ba-badge {
+        display: inline-block;
+        padding: 2px 10px;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+        border: 1px solid rgba(255,255,255,0.08);
+      }
+      .ba-group-header {
+        font-size: 1.05rem;
+        font-weight: 600;
+        margin: 0.25rem 0 0.35rem 0;
+      }
+      .ba-group-sub {
+        color: rgba(255,255,255,0.65);
+        font-size: 0.88rem;
+        margin-bottom: 0.75rem;
+      }
+      .ba-section-divider {
+        margin: 1.2rem 0 1.1rem 0;
+        border-top: 1px dashed rgba(255,255,255,0.12);
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ---------------------------------------------------------------------------
 # Sidebar — Planner weight controls
 # ---------------------------------------------------------------------------
 
@@ -69,7 +117,7 @@ with st.sidebar:
         "confidence":      w_conf,
     }
     st.divider()
-    st.caption("Pipeline: Ingest → Planner → Architect → Executor → Optimizer")
+    st.caption("Pipeline: Ingest → Planner → Scope → Executor → Optimizer")
 
 
 # ---------------------------------------------------------------------------
@@ -115,30 +163,106 @@ def load_pull_requests():
     return fetch_pull_requests(state="open")
 
 
+@st.cache_data(ttl=300)
+def load_closed_issues(days: int = 30):
+    """Closed issues in the last `days` days — real data for the resolved chart."""
+    try:
+        return fetch_closed_issues(days=days)
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=300)
+def load_merged_prs(days: int = 30):
+    try:
+        return fetch_merged_prs(days=days)
+    except Exception:
+        return []
+
+
 ingest_mode, planner_mode = get_pipeline_mode()
 weights_tuple = (w_user, w_biz, w_eff, w_conf)
 planned_issues = load_and_plan(weights_tuple, ingest_mode, planner_mode)
-recommended = [i for i in planned_issues if i["planner_score"]["recommended"]]
-not_recommended = [i for i in planned_issues if not i["planner_score"]["recommended"]]
+auto_recommended = [i for i in planned_issues if i["planner_score"]["recommended"]]
+manual_recommended = [i for i in planned_issues if not i["planner_score"]["recommended"]]
 
-if "approved_ids" not in st.session_state:
-    st.session_state.approved_ids = set()
+if "selected_ids" not in st.session_state:
+    st.session_state.selected_ids = set()
+# Migrate old key name if present from an earlier session
+if "approved_ids" in st.session_state and st.session_state.get("approved_ids"):
+    st.session_state.selected_ids |= set(st.session_state["approved_ids"])
 
 
 # ---------------------------------------------------------------------------
-# Execution readiness guard
+# Status derivation — single source of truth for badges
 # ---------------------------------------------------------------------------
+
+# (label, bg, fg) — dark-mode friendly chips
+STATUS_STYLE = {
+    "not_scoped":      ("Not scoped",        "rgba(150,150,150,0.18)", "#c9c9c9"),
+    "scoping":         ("Scoping…",          "rgba(40,130,210,0.22)",  "#7fb8ff"),
+    "scoped":          ("Scoped",            "rgba(40,167,69,0.20)",   "#7ad18d"),
+    "scope_review":    ("Scoped · review needed", "rgba(253,126,20,0.22)", "#ffb176"),
+    "scope_failed":    ("Scope failed",      "rgba(220,53,69,0.22)",   "#ff8a94"),
+    "ready":           ("Ready for execution", "rgba(40,167,69,0.28)", "#8ee39f"),
+    "in_progress":     ("In progress",       "rgba(40,130,210,0.22)",  "#7fb8ff"),
+    "awaiting_review": ("Awaiting review",   "rgba(253,126,20,0.22)",  "#ffb176"),
+    "completed":       ("Completed",         "rgba(40,167,69,0.28)",   "#8ee39f"),
+    "blocked":         ("Blocked",           "rgba(220,53,69,0.22)",   "#ff8a94"),
+}
+
+
+def derive_status(issue_id: int) -> str:
+    """
+    Resolve the canonical status key for an issue based on scope + execution state.
+    """
+    execution = store.get_execution(issue_id)
+    if execution:
+        s = execution.get("status", "")
+        if s == "Completed":
+            return "completed"
+        if s == "Awaiting Review":
+            return "awaiting_review"
+        if s == "Blocked":
+            return "blocked"
+        if s == "In Progress":
+            return "in_progress"
+
+    plan = store.get_scope_plan(issue_id)
+    if not plan:
+        return "not_scoped"
+
+    status = plan.get("scope_status", "")
+    if status == "pending":
+        return "scoping"
+    if status == "error":
+        return "scope_failed"
+    if status == "complete":
+        cs = plan.get("confidence_score", 0)
+        if cs < 75:
+            review = store.get_review(issue_id)
+            if not review or not review.get("review_approved"):
+                return "scope_review"
+        return "ready"
+    return "not_scoped"
+
+
+def badge_html(status_key: str) -> str:
+    label, bg, fg = STATUS_STYLE.get(status_key, STATUS_STYLE["not_scoped"])
+    return (
+        f"<span class='ba-badge' style='background:{bg};color:{fg};'>"
+        f"{label}</span>"
+    )
+
 
 def is_ready_to_execute(issue_id: int) -> tuple:
     """
-    An issue is ready to execute when:
-    1. It has a complete ArchitectPlan, AND
-    2. Either its confidence ≥ 75, or a human has approved it via Checkpoint 3.5.
-    Returns (ready: bool, reason: str).
+    Ready to execute when a complete ScopePlan exists AND either confidence ≥ 75
+    or a human has approved via Checkpoint 3.5.
     """
-    plan = store.get_architect_plan(issue_id)
-    if not plan or plan.get("architect_status") != "complete":
-        return False, "Architect plan required before execution"
+    plan = store.get_scope_plan(issue_id)
+    if not plan or plan.get("scope_status") != "complete":
+        return False, "Scope plan required before execution"
     if plan["confidence_score"] < 75:
         review = store.get_review(issue_id)
         if not review or not review.get("review_approved"):
@@ -150,8 +274,15 @@ def is_ready_to_execute(issue_id: int) -> tuple:
 # Header
 # ---------------------------------------------------------------------------
 
-st.image("finserv_logo.svg", width=280)
+try:
+    st.image("finserv_logo.svg", width=280)
+except Exception:
+    pass
 st.title("Backlog Autopilot")
+st.caption(
+    "Review issues · select the ones you want to work on · scope them with Devin · "
+    "approve · run execution."
+)
 st.divider()
 
 
@@ -168,72 +299,86 @@ tab_pipeline, tab_business = st.tabs(["Pipeline", "Business Report"])
 
 with tab_pipeline:
 
-    # --- KPI cards ---
+    # -----------------------------------------------------------------------
+    # KPI cards — grounded in real data only
+    # -----------------------------------------------------------------------
+
     all_sessions = store.all_executions()
-    status_counts = {}
+    status_counts: dict = {}
     for s in all_sessions:
         status_counts[s["status"]] = status_counts.get(s["status"], 0) + 1
 
     prs = load_pull_requests()
 
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-    col1.metric("Open Issues",  len(planned_issues))
-    col2.metric("Recommended",  len(recommended))
-    col3.metric("Dispatched",   len(all_sessions))
-    col4.metric("Completed",    status_counts.get("Completed", 0))
-    col5.metric("Blocked",      status_counts.get("Blocked", 0))
-    col6.metric("Open PRs",     len(prs))
+    scoped_ids = {
+        int(p["issue_id"]) for p in store.all_scope_plans()
+        if p.get("scope_status") == "complete"
+    }
+    ready_ids = {i["id"] for i in planned_issues if is_ready_to_execute(i["id"])[0]}
+    closed_recent = load_closed_issues(days=30)
+
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("Open issues",          len(planned_issues))
+    k2.metric("Scoped",                len(scoped_ids))
+    k3.metric("Ready for execution",   len(ready_ids))
+    k4.metric("In progress",           status_counts.get("In Progress", 0))
+    k5.metric("Completed (tracked)",   status_counts.get("Completed", 0))
+    k6.metric("Resolved · 30d (repo)", len(closed_recent))
 
     st.markdown("")
 
-    # --- Resolution chart ---
-    CHART_DATA = {
-        "Past Week": pd.DataFrame({
-            "Day": ["Apr 9", "Apr 10", "Apr 11", "Apr 12", "Apr 13", "Apr 14", "Apr 15"],
-            "Devin": [4, 7, 5, 9, 6, 2, len([p for p in prs if "devin" in p.get("head_branch", "").lower()])],
-            "Engineers": [2, 3, 1, 2, 4, 0, 0],
-        }),
-        "Past Month": pd.DataFrame({
-            "Day": ["Mar 17", "Mar 19", "Mar 21", "Mar 23", "Mar 25", "Mar 27", "Mar 29",
-                    "Mar 31", "Apr 2",  "Apr 4",  "Apr 6",  "Apr 8",  "Apr 10", "Apr 12", "Apr 15"],
-            "Devin": [2, 3, 5, 4, 6, 8, 7, 9, 6, 10, 8, 7, 9, 2,
-                      len([p for p in prs if "devin" in p.get("head_branch", "").lower()])],
-            "Engineers": [3, 2, 4, 1, 3, 2, 5, 3, 2, 4, 1, 3, 2, 0, 0],
-        }),
-        "Past Year": pd.DataFrame({
-            "Day": ["May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr"],
-            "Devin":     [0,  0,  0,  0,  0, 12, 28, 45, 62, 78, 95, 36],
-            "Engineers": [18, 22, 15, 20, 24, 19, 17, 14, 16, 12, 15, 12],
-        }),
-    }
+    # -----------------------------------------------------------------------
+    # Issues resolved — REAL data (closed issues by day, last 30 days)
+    # -----------------------------------------------------------------------
 
-    chart_header_col, chart_toggle_col = st.columns([6, 4])
-    with chart_header_col:
-        st.subheader("Issues Resolved")
-    with chart_toggle_col:
-        time_range = st.radio(
-            "Time range", ["Past Week", "Past Month", "Past Year"],
-            horizontal=True, label_visibility="collapsed"
+    merged_prs = load_merged_prs(days=30)
+
+    resolved_col, resolved_info = st.columns([6, 4])
+    with resolved_col:
+        st.subheader("Issues resolved · last 30 days")
+    with resolved_info:
+        st.caption(
+            f"Source: closed issues in `sarahmoooree-builds/finserv-platform`. "
+            f"{len(merged_prs)} PR(s) merged in the same window."
         )
 
-    chart_df = CHART_DATA[time_range]
-    day_order = chart_df["Day"].tolist()
-    chart_melted = chart_df.melt("Day", var_name="Source", value_name="Issues")
-    chart = (
-        alt.Chart(chart_melted)
-        .mark_line(point=True, strokeWidth=2.5)
-        .encode(
-            x=alt.X("Day:N", sort=day_order, axis=alt.Axis(labelAngle=0, title=None)),
-            y=alt.Y("Issues:Q", title="Issues Resolved"),
-            color=alt.Color(
-                "Source:N",
-                scale=alt.Scale(domain=["Devin", "Engineers"], range=["#1B7A8E", "#0F4C81"]),
-                legend=alt.Legend(title=None, orient="bottom"),
-            ),
+    if closed_recent:
+        # Bucket closed_at into calendar days (UTC).
+        rows = []
+        for c in closed_recent:
+            try:
+                dt = datetime.fromisoformat(c["closed_at"].replace("Z", "+00:00"))
+            except Exception:
+                continue
+            rows.append(dt.date())
+
+        today = datetime.now(timezone.utc).date()
+        start = today - timedelta(days=29)
+        day_index = {start + timedelta(days=i): 0 for i in range(30)}
+        for d in rows:
+            if d in day_index:
+                day_index[d] += 1
+
+        chart_df = pd.DataFrame(
+            [{"Day": d.isoformat(), "Resolved": n} for d, n in day_index.items()]
         )
-        .properties(height=280)
-    )
-    st.altair_chart(chart, use_container_width=True)
+        chart = (
+            alt.Chart(chart_df)
+            .mark_bar(color="#1B7A8E")
+            .encode(
+                x=alt.X("Day:T", axis=alt.Axis(title=None, format="%b %d", labelAngle=0)),
+                y=alt.Y("Resolved:Q", title="Issues closed"),
+                tooltip=["Day:T", "Resolved:Q"],
+            )
+            .properties(height=230)
+        )
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        st.info(
+            "No issues have been closed in the last 30 days on the target repo — "
+            "so there is no real trend to plot yet. The KPI cards above are grounded "
+            "in live counts; this chart will populate as issues are resolved."
+        )
 
     st.divider()
 
@@ -244,17 +389,16 @@ with tab_pipeline:
     with st.container(border=True):
         hcol, bcol = st.columns([5, 5])
         with hcol:
-            st.markdown("**AI Analysis**")
+            st.markdown("**AI analysis**")
             st.caption(
                 "Devin normalises messy GitHub labels and ranks issues with business "
                 "reasoning — in a single session."
             )
         with bcol:
-            analysis_meta = get_pipeline_meta("ingest")  # set by combined function
+            analysis_meta = get_pipeline_meta("ingest")
             if ingest_mode == "devin" and analysis_meta:
                 st.success("Devin-powered")
-                rec_count = len([i for i in planned_issues
-                                 if i.get("planner_score", {}).get("recommended")])
+                rec_count = len(auto_recommended)
                 total_count = analysis_meta.get("issue_count", len(planned_issues))
                 st.caption(
                     f"{total_count} issues analysed · {rec_count} recommended · "
@@ -269,7 +413,7 @@ with tab_pipeline:
                     st.rerun()
             else:
                 st.info("Rule-based (instant · use sliders to adjust weights)")
-                if st.button("Run AI Analysis with Devin", key="run_analysis_devin",
+                if st.button("Run AI analysis with Devin", key="run_analysis_devin",
                              help="One Devin session normalises labels AND ranks by business impact (~5 min)"):
                     with st.spinner("Devin is analysing issues… (~5 min)"):
                         raw = fetch_issues()
@@ -296,356 +440,425 @@ with tab_pipeline:
     st.markdown("")
 
     # -----------------------------------------------------------------------
-    # Issues for Automation
+    # Unified issue list
     # -----------------------------------------------------------------------
 
-    st.header("Issues for Automation")
+    st.subheader("Issues")
     st.caption(
-        "Ranked and prioritised by user impact, business impact, effort, and automation "
-        "confidence. Approve issues below, then run the Architect to get a technical plan."
+        "Select any issue to include it in the next scoping run. The recommendation "
+        "groups below are guidance — selection is never locked to a single group."
     )
 
-    if not recommended:
-        st.info("No issues are currently recommended for automation. "
-                "Try adjusting the Planner weights in the sidebar.")
-    else:
-        # --- Run Architect on All button ---
-        not_yet_architected = [i for i in recommended if not store.is_architected(i["id"])]
-        arch_col, arch_spacer = st.columns([2, 8])
-        with arch_col:
-            if not_yet_architected:
-                if st.button("Run Architect on All",
-                             help="Run Devin architecture planning on all un-architected recommended issues"):
-                    try:
-                        with st.spinner(
-                            f"Architecting {len(not_yet_architected)} issue(s) with Devin… "
-                            "this takes 4–6 minutes per issue."
-                        ):
-                            results = architect_issues(not_yet_architected)
-                        errors = [r for r in results.values()
-                                  if isinstance(r, dict) and r.get("architect_status") == "error"]
-                        if errors:
-                            st.warning(f"{len(errors)} issue(s) failed to architect. "
-                                       "See each issue for details.")
-                    except Exception as e:
-                        st.error(f"Architect error: {str(e)}")
-                    st.rerun()
-            else:
-                st.caption("All issues have Architect plans")
+    selectable_ids = {
+        i["id"] for i in planned_issues
+        if derive_status(i["id"]) == "not_scoped" and not store.is_dispatched(i["id"])
+    }
+    currently_selected = st.session_state.selected_ids & selectable_ids
 
-        st.markdown("")
+    # --- Action row ---
+    a1, a2, a3, a4 = st.columns([2.0, 2.2, 2.2, 3.6])
 
-        for issue in recommended:
-            issue_id = issue["id"]
-            already_sent = store.is_dispatched(issue_id)
-            arch_plan = store.get_architect_plan(issue_id)
-            score = issue["planner_score"]
+    with a1:
+        if st.button("Select all recommended", disabled=not auto_recommended):
+            for i in auto_recommended:
+                if i["id"] in selectable_ids:
+                    st.session_state.selected_ids.add(i["id"])
+            st.rerun()
 
-            # Build title tags
-            confidence_tag = ""
-            if arch_plan:
-                if arch_plan.get("architect_status") == "complete":
-                    cs = arch_plan["confidence_score"]
-                    label, _ = confidence_label(cs)
-                    confidence_tag = f"  ·  {label} ({cs}%)"
-                elif arch_plan.get("architect_status") == "pending":
-                    confidence_tag = "  ·  Architecting…"
-                elif arch_plan.get("architect_status") == "error":
-                    confidence_tag = "  ·  Architect Failed"
+    with a2:
+        if st.button("Clear selection", disabled=not currently_selected):
+            st.session_state.selected_ids.clear()
+            st.rerun()
 
-            execution = store.get_execution(issue_id) if already_sent else None
-            dispatch_tag = f"  ·  {execution['status']}" if execution else ""
-
-            col_check, col_info = st.columns([0.5, 9.5])
-
-            with col_check:
-                if already_sent:
-                    st.checkbox("Sent", key=f"approve_{issue_id}", value=True,
-                                disabled=True, label_visibility="collapsed")
-                else:
-                    checked = st.checkbox(
-                        "Approve", key=f"approve_{issue_id}",
-                        value=issue_id in st.session_state.approved_ids,
-                        label_visibility="collapsed"
-                    )
-                    if checked:
-                        st.session_state.approved_ids.add(issue_id)
-                    else:
-                        st.session_state.approved_ids.discard(issue_id)
-
-            with col_info:
-                with st.expander(
-                    f"#{issue_id} — {issue['title']}{confidence_tag}{dispatch_tag}"
+    with a3:
+        # Selected issues that still need scoping
+        to_scope = [
+            i for i in planned_issues
+            if i["id"] in st.session_state.selected_ids
+            and derive_status(i["id"]) == "not_scoped"
+        ]
+        scope_label = f"Scope selected issues ({len(to_scope)})" if to_scope else "Scope selected issues"
+        st.markdown(
+            """<style>
+            div[data-testid="stColumn"]:nth-child(3) button {
+                background-color: #1B7A8E; color: white; border: none;
+            }
+            div[data-testid="stColumn"]:nth-child(3) button:hover {
+                background-color: #145c6b; color: white; border: none;
+            }
+            </style>""",
+            unsafe_allow_html=True,
+        )
+        if st.button(scope_label, disabled=len(to_scope) == 0, key="scope_selected_cta"):
+            try:
+                with st.spinner(
+                    f"Scoping {len(to_scope)} issue(s) with Devin… "
+                    "this takes 4–6 minutes per issue."
                 ):
-                    # Priority + score row
-                    sc1, sc2, sc3, sc4, sc5 = st.columns(5)
-                    sc1.metric("Priority", f"#{score['priority_rank']}")
-                    sc2.metric("Score",    f"{score['total_score']:.1f}/10")
-                    sc3.metric("Impact",   f"{score['user_impact']}/10")
-                    sc4.metric("Effort",   f"{score['effort']}/10")
-                    sc5.metric("Confidence", f"{score['confidence']}/10")
-                    st.caption(f"**Why:** {score['recommendation_reason']}")
+                    results = scope_issues(to_scope)
+                errors = [r for r in results.values()
+                          if isinstance(r, dict) and r.get("scope_status") == "error"]
+                if errors:
+                    st.warning(
+                        f"{len(errors)} issue(s) failed to scope. "
+                        "Open them below for details."
+                    )
+            except Exception as e:
+                st.error(f"Scope error: {str(e)}")
+            st.rerun()
+
+    with a4:
+        # Run selected that are ready
+        to_run = [
+            i for i in planned_issues
+            if i["id"] in st.session_state.selected_ids
+            and is_ready_to_execute(i["id"])[0]
+            and not store.is_dispatched(i["id"])
+        ]
+        not_ready_selected = [
+            i for i in planned_issues
+            if i["id"] in st.session_state.selected_ids
+            and not is_ready_to_execute(i["id"])[0]
+            and not store.is_dispatched(i["id"])
+        ]
+        run_label = f"Run execution ({len(to_run)})" if to_run else "Run execution"
+        st.markdown(
+            """<style>
+            div[data-testid="stColumn"]:nth-child(4) button {
+                background-color: #28a745; color: white; border: none;
+            }
+            div[data-testid="stColumn"]:nth-child(4) button:hover {
+                background-color: #218838; color: white; border: none;
+            }
+            </style>""",
+            unsafe_allow_html=True,
+        )
+        if st.button(run_label, disabled=len(to_run) == 0, key="run_execution_cta"):
+            with st.spinner("Dispatching to Devin Executor…"):
+                execute_issues(to_run)
+            st.rerun()
+        if not_ready_selected and not to_run:
+            st.caption(
+                f"{len(not_ready_selected)} selected issue(s) need scoping or review first."
+            )
+
+    st.markdown("")
+
+    # --- Group 1: Recommended for automation ---
+
+    st.markdown(
+        "<div class='ba-group-header'>Recommended for automation</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div class='ba-group-sub'>"
+        f"{len(auto_recommended)} issue(s) scored as strong automation candidates — "
+        f"narrow scope, clear intent, low-to-medium complexity."
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    def render_issue_row(issue: dict, recommended_group: bool) -> None:
+        issue_id = issue["id"]
+        score = issue["planner_score"]
+        status_key = derive_status(issue_id)
+        already_sent = store.is_dispatched(issue_id)
+        scope_plan = store.get_scope_plan(issue_id)
+
+        col_check, col_info = st.columns([0.45, 9.55])
+
+        with col_check:
+            if already_sent or status_key in ("completed", "in_progress", "awaiting_review",
+                                               "blocked", "scoping"):
+                st.checkbox(
+                    "Selected",
+                    key=f"select_{issue_id}",
+                    value=True,
+                    disabled=True,
+                    label_visibility="collapsed",
+                )
+            else:
+                checked = st.checkbox(
+                    "Select",
+                    key=f"select_{issue_id}",
+                    value=issue_id in st.session_state.selected_ids,
+                    label_visibility="collapsed",
+                )
+                if checked:
+                    st.session_state.selected_ids.add(issue_id)
+                else:
+                    st.session_state.selected_ids.discard(issue_id)
+
+        with col_info:
+            # Title row with status badge via markdown header
+            header_line = (
+                f"#{issue_id} — {issue['title']}  ·  "
+                f"score {score['total_score']:.1f}/10"
+            )
+            # Streamlit expanders don't render HTML in their label — render a badge
+            # on the line above the expander so status is always visible.
+            st.markdown(
+                f"<div style='margin-bottom:-6px;'>{badge_html(status_key)}</div>",
+                unsafe_allow_html=True,
+            )
+            with st.expander(header_line):
+                # Priority row
+                sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+                sc1.metric("Priority",   f"#{score['priority_rank']}")
+                sc2.metric("Impact",     f"{score['user_impact']}/10")
+                sc3.metric("Business",   f"{score['business_impact']}/10")
+                sc4.metric("Effort",     f"{score['effort']}/10")
+                sc5.metric("Confidence", f"{score['confidence']}/10")
+
+                # Recommendation reason — always shown so "why" is obvious
+                st.markdown(
+                    f"**Why {'recommended' if recommended_group else 'kept for manual handling'}:** "
+                    f"{score['recommendation_reason']}"
+                )
+
+                st.divider()
+
+                # --- Scope plan display ---
+                if scope_plan and scope_plan.get("scope_status") == "pending":
+                    session_url = scope_plan.get("session_url", "")
+                    if session_url:
+                        st.info(
+                            f"Devin is scoping this issue… "
+                            f"[open session]({session_url})"
+                        )
+                    else:
+                        st.info("Devin is scoping this issue…")
+
+                elif scope_plan and scope_plan.get("scope_status") == "error":
+                    st.warning(f"Scope failed: {scope_plan.get('error', 'Unknown error')}")
+                    if scope_plan.get("session_url"):
+                        st.markdown(f"[View Devin session]({scope_plan['session_url']})")
+                    if st.button("Retry scope", key=f"retry_scope_{issue_id}"):
+                        store.clear_scope_plan(issue_id)
+                        try:
+                            with st.spinner("Creating Devin scope session…"):
+                                scope_issue(issue)
+                        except Exception as e:
+                            st.error(f"Scope error: {str(e)}")
+                        st.rerun()
+
+                elif scope_plan and scope_plan.get("scope_status") == "complete":
+                    cs = scope_plan["confidence_score"]
+                    label, color = confidence_label(cs)
+
+                    st.markdown(
+                        f"<div style='background:{color}20; border-left:4px solid {color}; "
+                        f"padding:10px 14px; border-radius:4px; margin-bottom:12px;'>"
+                        f"<strong style='color:{color}'>Scope confidence: {cs}/100 — {label}</strong><br>"
+                        f"<span style='font-size:0.9em'>{scope_plan['confidence_reasoning']}</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                    ar1, ar2, ar3 = st.columns(3)
+                    with ar1:
+                        st.markdown("**Root cause**")
+                        st.markdown(scope_plan["root_cause_hypothesis"])
+                        st.markdown("**Affected files**")
+                        for f in scope_plan.get("affected_files", []):
+                            st.markdown(f"- `{f}`")
+                        st.caption(f"~{scope_plan.get('estimated_lines_changed', '?')} lines")
+                    with ar2:
+                        st.markdown("**Task breakdown**")
+                        for i, task in enumerate(scope_plan.get("task_breakdown", []), 1):
+                            st.markdown(f"{i}. {task}")
+                    with ar3:
+                        st.markdown("**Risks**")
+                        for r in scope_plan.get("risks", []):
+                            st.markdown(f"- {r}")
+                        deps = scope_plan.get("dependencies", [])
+                        if deps:
+                            st.markdown("**Dependencies**")
+                            for d in deps:
+                                st.markdown(f"- {d}")
+
+                    if scope_plan.get("session_url"):
+                        st.markdown(f"[View scope session]({scope_plan['session_url']})")
+
+                    # Checkpoint 3.5 — Human review gate (low-confidence)
+                    if cs < 75:
+                        review = store.get_review(issue_id)
+                        if not review or not review.get("review_approved"):
+                            st.warning(
+                                f"Scope confidence is {cs}/100 (below 75). "
+                                "Human review recommended before dispatching."
+                            )
+                            review_notes = st.text_area(
+                                "Review notes (optional)",
+                                key=f"review_notes_{issue_id}",
+                            )
+                            rv1, rv2, _ = st.columns([1.5, 1.5, 7])
+                            with rv1:
+                                if st.button("Approve for execution",
+                                             key=f"review_approve_{issue_id}"):
+                                    store.set_review(issue_id, {
+                                        "issue_id": issue_id,
+                                        "review_required": True,
+                                        "review_approved": True,
+                                        "review_notes": review_notes,
+                                        "reviewed_at": datetime.now().isoformat(),
+                                    })
+                                    st.rerun()
+                            with rv2:
+                                if st.button("Proceed anyway",
+                                             key=f"review_skip_{issue_id}"):
+                                    store.set_review(issue_id, {
+                                        "issue_id": issue_id,
+                                        "review_required": True,
+                                        "review_approved": True,
+                                        "review_notes": "Skipped by user",
+                                        "reviewed_at": datetime.now().isoformat(),
+                                    })
+                                    st.rerun()
+                        else:
+                            st.success(
+                                f"Reviewed: {review.get('review_notes') or 'Approved'}"
+                            )
 
                     st.divider()
 
-                    # --- Architect plan display ---
-                    if arch_plan and arch_plan.get("architect_status") == "pending":
-                        session_url = arch_plan.get("session_url", "")
-                        st.info(f"Devin is analysing this issue… [{session_url}]({session_url})")
-
-                    elif arch_plan and arch_plan.get("architect_status") == "error":
-                        st.warning(f"Architect failed: {arch_plan.get('error', 'Unknown error')}")
-                        if arch_plan.get("session_url"):
-                            st.markdown(f"[View Devin session]({arch_plan['session_url']})")
-                        if st.button("Retry Architect", key=f"retry_arch_{issue_id}"):
-                            store.clear_architect_plan(issue_id)
-                            try:
-                                with st.spinner("Creating Devin architect session…"):
-                                    architect_issue(issue)
-                            except Exception as e:
-                                st.error(f"Architect error: {str(e)}")
-                            st.rerun()
-
-                    elif arch_plan and arch_plan.get("architect_status") == "complete":
-                        cs = arch_plan["confidence_score"]
-                        label, color = confidence_label(cs)
-
-                        # Confidence badge
-                        st.markdown(
-                            f"<div style='background:{color}20; border-left:4px solid {color}; "
-                            f"padding:10px 14px; border-radius:4px; margin-bottom:12px;'>"
-                            f"<strong style='color:{color}'>Architect Confidence: {cs}/100 — {label}</strong><br>"
-                            f"<span style='font-size:0.9em'>{arch_plan['confidence_reasoning']}</span>"
-                            f"</div>",
-                            unsafe_allow_html=True,
-                        )
-
-                        ar1, ar2, ar3 = st.columns(3)
-                        with ar1:
-                            st.markdown("**Root Cause**")
-                            st.markdown(arch_plan["root_cause_hypothesis"])
-                            st.markdown("**Affected Files**")
-                            for f in arch_plan.get("affected_files", []):
-                                st.markdown(f"- `{f}`")
-                            st.caption(f"~{arch_plan.get('estimated_lines_changed', '?')} lines")
-                        with ar2:
-                            st.markdown("**Task Breakdown**")
-                            for i, task in enumerate(arch_plan.get("task_breakdown", []), 1):
-                                st.markdown(f"{i}. {task}")
-                        with ar3:
-                            st.markdown("**Risks**")
-                            for r in arch_plan.get("risks", []):
-                                st.markdown(f"- {r}")
-                            deps = arch_plan.get("dependencies", [])
-                            if deps:
-                                st.markdown("**Dependencies**")
-                                for d in deps:
-                                    st.markdown(f"- {d}")
-
-                        if arch_plan.get("session_url"):
-                            st.markdown(f"[View Architect session]({arch_plan['session_url']})")
-
-                        # --- Checkpoint 3.5: Human Review gate (low-confidence) ---
-                        if cs < 75:
-                            review = store.get_review(issue_id)
-                            if not review or not review.get("review_approved"):
-                                st.warning(
-                                    f"⚠️ Checkpoint 3.5 — Architect confidence is {cs}/100 "
-                                    "(below 75). Human review recommended before dispatching."
-                                )
-                                review_notes = st.text_area(
-                                    "Review notes (optional)",
-                                    key=f"review_notes_{issue_id}"
-                                )
-                                rv1, rv2, _ = st.columns([1.5, 1.5, 7])
-                                with rv1:
-                                    if st.button("Approve for Execution",
-                                                 key=f"review_approve_{issue_id}"):
-                                        store.set_review(issue_id, {
-                                            "issue_id": issue_id,
-                                            "review_required": True,
-                                            "review_approved": True,
-                                            "review_notes": review_notes,
-                                            "reviewed_at": datetime.now().isoformat(),
-                                        })
-                                        st.rerun()
-                                with rv2:
-                                    if st.button("Proceed Anyway",
-                                                 key=f"review_skip_{issue_id}"):
-                                        store.set_review(issue_id, {
-                                            "issue_id": issue_id,
-                                            "review_required": True,
-                                            "review_approved": True,
-                                            "review_notes": "Skipped by user",
-                                            "reviewed_at": datetime.now().isoformat(),
-                                        })
-                                        st.rerun()
-                            else:
-                                st.success(
-                                    f"✓ Checkpoint 3.5 — Reviewed: "
-                                    f"{review.get('review_notes') or 'Approved'}"
-                                )
-
-                        st.divider()
-
-                    else:
-                        # No architect plan yet — show the Run Architect button inline
-                        ready, reason = is_ready_to_execute(issue_id)
-                        if st.button("Run Architect", key=f"arch_{issue_id}"):
+                else:
+                    # Not yet scoped — inline per-issue scope button
+                    if not already_sent:
+                        if st.button("Scope this issue", key=f"scope_{issue_id}"):
                             try:
                                 with st.spinner(
-                                    "Creating Devin architect session… (4–6 min to complete)"
+                                    "Creating Devin scope session… (4–6 min to complete)"
                                 ):
-                                    architect_issue(issue)
+                                    scope_issue(issue)
                             except Exception as e:
-                                st.error(f"Architect error: {str(e)}")
+                                st.error(f"Scope error: {str(e)}")
                             st.rerun()
 
-                    # --- Standard issue fields ---
-                    st.markdown(f"**Summary:** {issue['summary']}")
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.markdown(f"**Type:** `{issue['issue_type']}`")
-                    c2.markdown(f"**Complexity:** `{issue['complexity']}`")
-                    c3.markdown(f"**Scope:** `{issue['scope']}`")
-                    c4.markdown(f"**Risk:** `{issue['risk']}`")
-                    if issue.get("implementation_options"):
-                        st.markdown("**Implementation options:**")
-                        for opt in issue["implementation_options"]:
-                            st.markdown(f"- {opt}")
+                # --- Standard issue fields ---
+                st.markdown(f"**Summary:** {issue['summary']}")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.markdown(f"**Type:** `{issue['issue_type']}`")
+                c2.markdown(f"**Complexity:** `{issue['complexity']}`")
+                c3.markdown(f"**Scope:** `{issue['scope']}`")
+                c4.markdown(f"**Risk:** `{issue['risk']}`")
+                if issue.get("implementation_options"):
+                    st.markdown("**Implementation options:**")
+                    for opt in issue["implementation_options"]:
+                        st.markdown(f"- {opt}")
+                if issue.get("labels"):
                     st.markdown(f"**Labels:** {', '.join(issue['labels'])}")
-                    if issue.get("duplicate_of"):
-                        st.caption(f"⚠️ Possible duplicate of issue #{issue['duplicate_of']}")
-                    st.caption(f"Age: {issue['age_days']} days | Comments: {issue['comments_count']}")
-                    if execution and execution.get("session_url"):
-                        st.markdown(f"[Open Executor Session]({execution['session_url']})")
+                if issue.get("duplicate_of"):
+                    st.caption(f"Possible duplicate of issue #{issue['duplicate_of']}")
+                st.caption(
+                    f"Age: {issue['age_days']} days · Comments: {issue['comments_count']}"
+                )
+                execution = store.get_execution(issue_id)
+                if execution and execution.get("session_url"):
+                    st.markdown(f"[Open executor session]({execution['session_url']})")
 
-        # --- Select All / Run Approved Issues buttons ---
-        st.markdown("")
-        new_approved = [
-            i for i in planned_issues
-            if i["id"] in st.session_state.approved_ids and not store.is_dispatched(i["id"])
-        ]
-        not_yet_dispatched = [i for i in recommended if not store.is_dispatched(i["id"])]
+    if auto_recommended:
+        for issue in auto_recommended:
+            render_issue_row(issue, recommended_group=True)
+    else:
+        st.caption("No issues currently scored as automation-ready. "
+                   "Adjust the Planner weights in the sidebar to see more.")
 
-        # Determine which approved issues are actually ready (have complete arch plan + review if needed)
-        ready_to_run = [i for i in new_approved if is_ready_to_execute(i["id"])[0]]
-
-        btn_left, btn_spacer, btn_right = st.columns([1.2, 7.2, 1.6])
-        with btn_left:
-            if not_yet_dispatched:
-                if st.button("Select All"):
-                    for issue in not_yet_dispatched:
-                        st.session_state.approved_ids.add(issue["id"])
-                    st.rerun()
-            else:
-                st.caption("All dispatched")
-
-        with btn_right:
-            st.markdown(
-                """<style>
-                div[data-testid="stColumn"]:last-child button {
-                    background-color: #28a745; color: white; border: none;
-                }
-                div[data-testid="stColumn"]:last-child button:hover {
-                    background-color: #218838; color: white; border: none;
-                }
-                </style>""",
-                unsafe_allow_html=True,
-            )
-            not_ready = len(new_approved) - len(ready_to_run)
-            btn_label = "Run Approved Issues"
-            if not_ready > 0 and new_approved:
-                btn_label = f"Run Approved Issues ({not_ready} need Architect/review)"
-
-            if st.button(btn_label, disabled=len(ready_to_run) == 0):
-                with st.spinner("Dispatching to Devin Executor…"):
-                    execute_issues(ready_to_run)
-                st.rerun()
-
-    st.divider()
-
-    # -----------------------------------------------------------------------
-    # Issues for Engineers (not recommended)
-    # -----------------------------------------------------------------------
-
-    st.header("Issues for Engineers")
-    st.caption(
-        "Not recommended for automation by the Planner. "
-        "Each includes the reason why it stays with the engineering team."
+    # --- Clear grouped divider ---
+    st.markdown("<div class='ba-section-divider'></div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='ba-group-header'>Recommended for manual handling</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div class='ba-group-sub'>"
+        f"{len(manual_recommended)} issue(s) scored as better suited for engineers — "
+        f"risky area, ambiguous scope, or high complexity. You can still select any "
+        f"of these to scope them anyway."
+        f"</div>",
+        unsafe_allow_html=True,
     )
 
-    for issue in not_recommended:
-        score = issue["planner_score"]
-        with st.expander(f"#{issue['id']} — {issue['title']}"):
-            st.markdown(f"**Summary:** {issue['summary']}")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.markdown(f"**Type:** `{issue['issue_type']}`")
-            c2.markdown(f"**Complexity:** `{issue['complexity']}`")
-            c3.markdown(f"**Scope:** `{issue['scope']}`")
-            c4.markdown(f"**Risk:** `{issue['risk']}`")
-            st.markdown(f"**Why not recommended:** {score['recommendation_reason']}")
-            st.caption(f"Score: {score['total_score']:.1f}/10 | "
-                       f"Age: {issue['age_days']} days | Comments: {issue['comments_count']}")
-            st.markdown(f"**Labels:** {', '.join(issue['labels'])}")
+    if manual_recommended:
+        for issue in manual_recommended:
+            render_issue_row(issue, recommended_group=False)
+    else:
+        st.caption("No issues in this group right now.")
 
     # -----------------------------------------------------------------------
-    # Stage 4: Executor — Execution Pipeline
+    # Execution pipeline — in-flight and terminal Devin sessions
     # -----------------------------------------------------------------------
 
-    all_sessions = store.all_executions()
     if all_sessions:
         st.divider()
-        st.header("Stage 4: Executor — Execution Pipeline")
+        st.subheader("Execution pipeline")
+        st.caption(
+            "Devin execution sessions dispatched from this app. "
+            "Use refresh to pull the latest status from the Devin API."
+        )
 
         refresh_col, _ = st.columns([1.5, 8.5])
         with refresh_col:
-            if st.button("Refresh Status"):
+            if st.button("Refresh status"):
                 with st.spinner("Polling Devin…"):
                     all_sessions = refresh_session_statuses()
                 st.rerun()
 
         open_prs = load_pull_requests()
+        # Map Devin status → internal status_key for badge reuse
+        EXEC_STATUS_MAP = {
+            "Completed":       "completed",
+            "Awaiting Review": "awaiting_review",
+            "In Progress":     "in_progress",
+            "Blocked":         "blocked",
+        }
+
         for session in all_sessions:
             status = session["status"]
-            icon = {"Completed": "✅", "Awaiting Review": "👀",
-                    "In Progress": "🔄", "Blocked": "🚫"}.get(status, "❓")
+            status_key = EXEC_STATUS_MAP.get(status, "in_progress")
             issue_id = session["issue_id"]
 
-            with st.expander(f"{icon} Issue #{issue_id}  |  **{status}**"):
+            st.markdown(
+                f"<div style='margin-top:4px;margin-bottom:-6px;'>"
+                f"{badge_html(status_key)}</div>",
+                unsafe_allow_html=True,
+            )
+            with st.expander(f"Issue #{issue_id}"):
                 st.markdown(f"**Outcome:** {session['outcome_summary']}")
                 if session.get("session_url"):
-                    st.markdown(f"[Open Executor Session]({session['session_url']})")
+                    st.markdown(f"[Open executor session]({session['session_url']})")
 
-                # Link to Architect session if available
-                arch = store.get_architect_plan(issue_id)
-                if arch and arch.get("session_url"):
-                    st.markdown(f"[View Architect Session]({arch['session_url']})")
+                sp = store.get_scope_plan(issue_id)
+                if sp and sp.get("session_url"):
+                    st.markdown(f"[View scope session]({sp['session_url']})")
 
                 matching_prs = [p for p in open_prs if str(issue_id) in p.get("title", "")]
                 if matching_prs:
-                    st.markdown("**Pull Requests:**")
+                    st.markdown("**Pull requests:**")
                     for pr in matching_prs:
                         st.markdown(f"- [{pr['title']}]({pr['url']}) — `{pr['state']}`")
 
     # -----------------------------------------------------------------------
-    # Stage 5: Optimizer
+    # Optimizer
     # -----------------------------------------------------------------------
 
     opt_records = all_optimizations()
-    all_exec = store.all_executions()
-    terminal_exec = [e for e in all_exec if e["status"] in ("Completed", "Blocked", "Awaiting Review")]
+    terminal_exec = [
+        e for e in all_sessions
+        if e["status"] in ("Completed", "Blocked", "Awaiting Review")
+    ]
 
     if terminal_exec:
         st.divider()
-        st.header("Stage 5: Optimizer")
+        st.subheader("Optimizer")
         st.caption(
-            "Compares estimated vs. actual effort for completed sessions. "
-            "Surfaces recurring patterns and recommends scoring adjustments."
+            "Compares estimated vs. actual effort for completed sessions, surfaces "
+            "recurring patterns, and suggests scoring adjustments."
         )
 
         opt_col, _ = st.columns([1.5, 8.5])
         with opt_col:
-            if st.button("Run Optimizer"):
+            if st.button("Run optimizer"):
                 try:
                     with st.spinner("Analysing completed sessions…"):
                         new_records = run_optimizer()
@@ -657,26 +870,27 @@ with tab_pipeline:
         if opt_records:
             summary = get_optimizer_summary()
             o1, o2, o3, o4 = st.columns(4)
-            o1.metric("Analysed",             summary["total_analyzed"])
-            o2.metric("Completion Rate",      f"{summary['completion_rate']:.0%}")
-            o3.metric("Blocked Rate",         f"{summary['blocked_rate']:.0%}")
-            o4.metric("Avg Confidence",       f"{summary['avg_architect_confidence']:.0f}/100")
+            o1.metric("Analysed",        summary["total_analyzed"])
+            o2.metric("Completion rate", f"{summary['completion_rate']:.0%}")
+            o3.metric("Blocked rate",    f"{summary['blocked_rate']:.0%}")
+            o4.metric("Avg scope confidence",
+                      f"{summary.get('avg_scope_confidence', 0):.0f}/100")
 
             if summary.get("top_patterns"):
-                st.markdown("**Recurring Patterns**")
+                st.markdown("**Recurring patterns**")
                 for tag, count in summary["top_patterns"]:
                     st.markdown(f"- `{tag}`: {count} occurrence(s)")
 
             if summary.get("heuristic_recommendations"):
-                st.markdown("**Heuristic Recommendations**")
+                st.markdown("**Heuristic recommendations**")
                 for rec in summary["heuristic_recommendations"]:
                     st.info(rec)
 
-            with st.expander("All Optimization Records"):
+            with st.expander("All optimization records"):
                 for rec in opt_records:
                     st.markdown(
                         f"**Issue #{rec['issue_id']}** — {rec['actual_status']} — "
-                        f"Accuracy: `{rec['estimation_accuracy']}`"
+                        f"accuracy: `{rec['estimation_accuracy']}`"
                     )
                     st.caption(rec["optimizer_notes"])
                     if rec.get("pattern_tags"):
@@ -685,160 +899,198 @@ with tab_pipeline:
 
 
 # ===========================================================================
-# TAB 2: BUSINESS REPORT
+# TAB 2: BUSINESS REPORT — grounded in live backlog + labelled projections
 # ===========================================================================
 
 with tab_business:
 
-    TOTAL_BACKLOG     = 312
-    AUTOMATABLE_PCT   = 0.28
-    AUTOMATABLE       = int(TOTAL_BACKLOG * AUTOMATABLE_PCT)
-    AVG_ENGINEER_HRS  = 5.5
-    AVG_DEVIN_HRS     = 0.75
-    ENGINEER_HOURLY   = 150
-    ISSUES_PER_WK_BEF = 8
-    ISSUES_PER_WK_AFT = 35
+    # --- Real, measurable data ---
+    live_backlog = len(planned_issues)
+    live_automatable = len(auto_recommended)
+    live_automatable_pct = (live_automatable / live_backlog) if live_backlog else 0.0
 
-    hours_saved          = AUTOMATABLE * (AVG_ENGINEER_HRS - AVG_DEVIN_HRS)
-    cost_saved           = hours_saved * ENGINEER_HOURLY
-    weeks_before         = AUTOMATABLE / ISSUES_PER_WK_BEF
-    weeks_after          = AUTOMATABLE / ISSUES_PER_WK_AFT
+    closed_30d = load_closed_issues(days=30)
+    merged_30d = load_merged_prs(days=30)
+    devin_merged_30d = [p for p in merged_30d if p["is_devin_authored"]]
 
-    st.header("Business Impact Report")
-    st.caption("Projected outcomes for FinServ Co. based on current backlog composition.")
+    st.header("Business impact")
+    st.caption(
+        "Everything labelled **Live** is pulled directly from the monitored repository. "
+        "Everything labelled **Projection** is a modelled forecast using transparent "
+        "assumptions — not measured data."
+    )
     st.markdown("")
 
-    h1, h2, h3, h4 = st.columns(4)
-    h1.metric("Automatable Issues",       f"{AUTOMATABLE}",             f"{int(AUTOMATABLE_PCT*100)}% of backlog")
-    h2.metric("Engineer Hours Recovered", f"{int(hours_saved):,} hrs",  "per backlog cycle")
-    h3.metric("Estimated Cost Savings",   f"${int(cost_saved):,}",      "in recovered eng. time")
-    h4.metric("Time to Clear Backlog",    f"{weeks_after:.0f} weeks",   f"vs. {weeks_before:.0f} weeks today")
+    # -----------------------------------------------------------------------
+    # Live metrics (real data)
+    # -----------------------------------------------------------------------
+
+    st.markdown("#### Live metrics")
+    l1, l2, l3, l4 = st.columns(4)
+    l1.metric("Open backlog", f"{live_backlog}", "source: GitHub (open issues)")
+    l2.metric(
+        "Automatable share",
+        f"{int(live_automatable_pct * 100)}%" if live_backlog else "—",
+        f"{live_automatable} of {live_backlog} recommended"
+        if live_backlog else "no issues",
+    )
+    l3.metric("Issues resolved · 30d", f"{len(closed_30d)}", "source: GitHub (closed)")
+    l4.metric(
+        "PRs merged · 30d",
+        f"{len(merged_30d)}",
+        f"{len(devin_merged_30d)} Devin-authored",
+    )
+
+    st.markdown("")
+
+    # -----------------------------------------------------------------------
+    # Projection (clearly labelled)
+    # -----------------------------------------------------------------------
+
+    st.markdown("#### Projection")
+    st.caption(
+        "The values below are **projections**, not measurements. They use the assumptions "
+        "shown in the expander so you can see exactly what they are based on — and change "
+        "them if needed."
+    )
+
+    with st.expander("Projection assumptions", expanded=False):
+        ast1, ast2, ast3 = st.columns(3)
+        with ast1:
+            avg_eng_hrs = st.number_input(
+                "Avg. engineer hours per automatable issue",
+                min_value=0.25, max_value=40.0, value=5.5, step=0.25,
+            )
+            eng_hourly = st.number_input(
+                "Engineer loaded hourly cost ($)",
+                min_value=50, max_value=500, value=150, step=10,
+            )
+        with ast2:
+            avg_devin_hrs = st.number_input(
+                "Avg. Devin hours per automatable issue",
+                min_value=0.05, max_value=10.0, value=0.75, step=0.05,
+            )
+            issues_per_wk_before = st.number_input(
+                "Issues closed per week (baseline)",
+                min_value=1, max_value=200, value=max(1, len(closed_30d) // 4 or 8),
+            )
+        with ast3:
+            issues_per_wk_after = st.number_input(
+                "Issues closed per week (with autopilot)",
+                min_value=1, max_value=500, value=35,
+            )
+
+    # Derived projections
+    hours_saved = live_automatable * (avg_eng_hrs - avg_devin_hrs)
+    cost_saved = hours_saved * eng_hourly
+    weeks_before = (live_backlog / issues_per_wk_before) if issues_per_wk_before else 0
+    weeks_after = (live_backlog / issues_per_wk_after) if issues_per_wk_after else 0
+
+    p1, p2, p3 = st.columns(3)
+    p1.metric(
+        "Projected engineer hours recovered",
+        f"{int(max(hours_saved, 0)):,} hrs",
+        "per backlog cycle",
+    )
+    p2.metric(
+        "Projected cost savings",
+        f"${int(max(cost_saved, 0)):,}",
+        "in recovered engineer time",
+    )
+    p3.metric(
+        "Projected time to clear backlog",
+        f"{weeks_after:.0f} wks" if weeks_after else "—",
+        f"vs. {weeks_before:.0f} wks today" if weeks_before else None,
+    )
+
+    st.markdown("")
+    st.markdown("##### Backlog burn-rate projection")
+    st.caption(
+        "Modelled forecast over 12 weeks using the assumptions above. "
+        "This is an illustration of the scenario, not a measurement."
+    )
+
+    weeks = list(range(0, 13))
+    remaining_before = [max(0, live_backlog - issues_per_wk_before * w) for w in weeks]
+    remaining_after = [max(0, live_backlog - issues_per_wk_after * w) for w in weeks]
+    burn_df = pd.DataFrame({
+        "Week": weeks * 2,
+        "Issues Remaining": remaining_before + remaining_after,
+        "Scenario": ["Without autopilot"] * 13 + ["With autopilot"] * 13,
+    })
+    burn_chart = (
+        alt.Chart(burn_df)
+        .mark_line(point=True, strokeWidth=2.5)
+        .encode(
+            x=alt.X("Week:Q", axis=alt.Axis(labelAngle=0, title="Weeks from now")),
+            y=alt.Y("Issues Remaining:Q", title="Open issues"),
+            color=alt.Color(
+                "Scenario:N",
+                scale=alt.Scale(
+                    domain=["With autopilot", "Without autopilot"],
+                    range=["#1B7A8E", "#6c757d"],
+                ),
+                legend=alt.Legend(title=None, orient="bottom"),
+            ),
+            tooltip=["Week:Q", "Scenario:N", "Issues Remaining:Q"],
+        )
+        .properties(height=280)
+    )
+    st.altair_chart(burn_chart, use_container_width=True)
 
     st.divider()
 
-    chart_col1, chart_col2 = st.columns(2)
+    # -----------------------------------------------------------------------
+    # Efficiency narrative — cites only data we can measure or model transparently
+    # -----------------------------------------------------------------------
 
-    with chart_col1:
-        st.subheader("Backlog Burn Rate Projection")
-        st.caption("Issues remaining over 12 weeks — with vs. without Devin")
-        weeks = list(range(0, 13))
-        remaining_before = [max(0, TOTAL_BACKLOG - ISSUES_PER_WK_BEF * w) for w in weeks]
-        remaining_after  = [max(0, TOTAL_BACKLOG - ISSUES_PER_WK_AFT * w) for w in weeks]
-        burn_df = pd.DataFrame({
-            "Week": weeks * 2,
-            "Issues Remaining": remaining_before + remaining_after,
-            "Scenario": ["Without Devin"] * 13 + ["With Devin"] * 13,
-        })
-        burn_chart = (
-            alt.Chart(burn_df)
-            .mark_line(point=True, strokeWidth=2.5)
-            .encode(
-                x=alt.X("Week:Q", axis=alt.Axis(labelAngle=0, title="Weeks from Now")),
-                y=alt.Y("Issues Remaining:Q", title="Open Issues"),
-                color=alt.Color(
-                    "Scenario:N",
-                    scale=alt.Scale(
-                        domain=["With Devin", "Without Devin"],
-                        range=["#1B7A8E", "#6c757d"]
-                    ),
-                    legend=alt.Legend(title=None, orient="bottom"),
-                ),
-            )
-            .properties(height=280)
-        )
-        st.altair_chart(burn_chart, use_container_width=True)
-
-    with chart_col2:
-        st.subheader("Time to Resolution")
-        st.caption("Average hours per issue — engineer vs. Devin, by issue type")
-        time_df = pd.DataFrame({
-            "Issue Type": ["Simple Bug", "Medium Bug", "Tech Debt",
-                           "Simple Bug", "Medium Bug", "Tech Debt"],
-            "Hours": [3.0, 6.5, 8.0, 0.5, 1.0, 1.5],
-            "Resolver": ["Engineer", "Engineer", "Engineer", "Devin", "Devin", "Devin"],
-        })
-        time_chart = (
-            alt.Chart(time_df)
-            .mark_bar()
-            .encode(
-                x=alt.X("Issue Type:N", axis=alt.Axis(labelAngle=0, title=None)),
-                y=alt.Y("Hours:Q", title="Avg. Hours to Resolve"),
-                color=alt.Color(
-                    "Resolver:N",
-                    scale=alt.Scale(domain=["Engineer", "Devin"], range=["#0F4C81", "#1B7A8E"]),
-                    legend=alt.Legend(title=None, orient="bottom"),
-                ),
-                xOffset="Resolver:N",
-            )
-            .properties(height=280)
-        )
-        st.altair_chart(time_chart, use_container_width=True)
-
-    st.divider()
-
-    st.subheader("Efficiency Breakdown")
+    st.subheader("Where the gains come from")
     eff1, eff2, eff3 = st.columns(3)
 
-    eff1.markdown("**Automation Coverage**")
+    eff1.markdown("**Automation coverage (live)**")
     eff1.markdown(
-        f"Of FinServ's **{TOTAL_BACKLOG} open issues**, the Planner identifies "
-        f"**{AUTOMATABLE} ({int(AUTOMATABLE_PCT*100)}%)** as safe candidates — "
-        f"clear bugs with narrow scope, low-to-medium complexity, and no risk "
-        f"overlap with auth or billing systems."
+        f"Of **{live_backlog} open issues** in the repo, the Planner flags "
+        f"**{live_automatable} ({int(live_automatable_pct * 100)}%)** as "
+        f"automation candidates — issues with narrow scope, clear intent, and "
+        f"low-to-medium complexity. Everything else is recommended for manual handling."
     )
-    eff2.markdown("**Speed Multiplier**")
+
+    eff2.markdown("**Speed (projection)**")
     eff2.markdown(
-        f"Devin resolves issues in an average of **{int(AVG_DEVIN_HRS*60)} minutes** "
-        f"vs. **{AVG_ENGINEER_HRS} hours** for a senior engineer. That's a "
-        f"**{AVG_ENGINEER_HRS / AVG_DEVIN_HRS:.0f}x speed improvement** on eligible "
-        f"issues, with no context-switching cost."
+        f"Assuming {avg_devin_hrs:.2f} hrs per issue for Devin vs. "
+        f"{avg_eng_hrs:.1f} hrs for a senior engineer, autopilot is modelled "
+        f"at roughly **{max(avg_eng_hrs / max(avg_devin_hrs, 0.01), 1):.0f}× faster** "
+        f"on eligible issues. Hard proof will come from the Optimizer as real "
+        f"sessions complete."
     )
-    eff3.markdown("**Engineer Time Redirect**")
+
+    eff3.markdown("**Engineer time redirect (projection)**")
     eff3.markdown(
-        f"Automating {AUTOMATABLE} issues recovers **{int(hours_saved):,} engineering "
-        f"hours** — equivalent to **{int(hours_saved / 2000)} full-time engineer years** "
-        f"— that can be redirected to platform work, architecture, and revenue features."
+        f"Under these assumptions, automating {live_automatable} issues would recover "
+        f"**~{int(max(hours_saved, 0)):,} engineer hours** that can be redirected to "
+        f"platform, architecture, and revenue work. This scales linearly with the "
+        f"automatable share of the backlog."
     )
 
     st.divider()
 
-    st.subheader("How We Measure Success")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Target: Backlog Cleared",  "12 weeks",   "from 38 weeks today")
-    m2.metric("Target: PR Merge Rate",    "≥ 85%",      "Devin PRs passing review")
-    m3.metric("Target: Test Pass Rate",   "≥ 95%",      "on Devin-authored changes")
-    m4.metric("Target: Weekly Velocity",  "35 issues/wk", "up from 8 today")
+    # -----------------------------------------------------------------------
+    # Success criteria (phrased as targets, not achievements)
+    # -----------------------------------------------------------------------
+
+    st.subheader("Success criteria (targets)")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Target · backlog reduction", "≥ 60%", "over 90 days")
+    m2.metric("Target · Devin PR merge rate", "≥ 85%", "passing review")
+    m3.metric("Target · regression rate",   "0",      "on Devin-authored PRs")
 
     st.markdown("")
-    st.markdown("""
-**Success criteria (90-day review):**
-- Automatable backlog reduced by at least 60%
-- No regressions introduced by Devin-authored PRs
-- Senior engineers report measurable reduction in backlog-related interruptions
-- Optimizer patterns inform scoring weight adjustments each sprint
-""")
-
-    st.divider()
-
-    st.subheader("Business Implications for FinServ Co.")
-    bi1, bi2 = st.columns(2)
-
-    with bi1:
-        st.markdown("**What changes immediately**")
-        st.markdown(f"""
-- Stale issues begin resolving within hours of Architect approval, not weeks
-- The Planner surfaces the highest-ROI issues first — not just the oldest
-- Junior engineers review Devin's PRs instead of triaging ambiguous issues
-- Senior engineers reclaim ~{int(hours_saved / 12)} hours/month previously spent on backlog triage
-""")
-    with bi2:
-        st.markdown("**What changes at scale**")
-        st.markdown("""
-- The Optimizer learns which issue types Devin handles best — improving accuracy over time
-- A shrinking backlog signals engineering health to leadership and auditors
-- Issue resolution becomes a predictable, measurable process instead of an art form
-- The system is additive — engineers approve, Devin executes, humans stay in control
-""")
+    st.markdown(
+        "**How we'll know it's working:** the Optimizer (Stage 5) compares Scope "
+        "estimates to actual PR outcomes and surfaces pattern tags such as "
+        "`underestimated-scope` or `confidence-mismatch`. Those tags are grounded "
+        "in completed sessions — not in projections."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -850,5 +1102,5 @@ st.caption(
     "Backlog Autopilot — Built for FinServ Co. | "
     "Live data from GitHub · "
     "Ingest + Planner: rule-based by default, combined Devin analysis on demand · "
-    "Architect + Executor powered by Devin · Optimizer learns from outcomes"
+    "Scope + Executor powered by Devin · Optimizer learns from outcomes"
 )
