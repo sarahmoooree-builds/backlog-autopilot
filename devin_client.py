@@ -12,11 +12,25 @@ Error contract for create_session:
 """
 
 import json
+import logging
 import time
 import requests
 from typing import Optional
 
 from config import DEVIN_API_BASE, DEVIN_API_KEY, DEVIN_ORG_ID
+
+logger = logging.getLogger(__name__)
+
+
+def _label_logger(label: str) -> logging.Logger:
+    """Return the logger to use for messages emitted on behalf of ``label``.
+
+    Each stage passes its own short name (``ingest``, ``scope``, ``planner``,
+    ``analyse``). Routing through ``logging.getLogger(label)`` makes
+    devin_client output appear under the same logger name as the caller, so
+    operators can filter by stage without juggling per-call loggers.
+    """
+    return logging.getLogger(label) if label else logger
 
 # Re-export so existing `from devin_client import DEVIN_API_BASE` usage keeps
 # working while config.py is the source of truth.
@@ -106,8 +120,11 @@ def poll_until_done(session_id: str, timeout: int = 360,
     Uses the canonical non-terminal status set and work-product-ready detail
     values. Returns the final session dict or ``None`` on timeout.
 
-    ``label`` controls the log prefix, e.g. ``"ingest"`` → ``[ingest] Poll #1``.
+    ``label`` selects the logger used for emitted messages — pass the
+    caller's short stage name (``"ingest"``, ``"scope"``, …) so output groups
+    under that stage's own logger.
     """
+    log = _label_logger(label)
     headers = _auth_headers()
     deadline = time.time() + timeout
     attempt = 0
@@ -124,24 +141,32 @@ def poll_until_done(session_id: str, timeout: int = 360,
                 session = response.json()
                 status = (session.get("status") or "unknown").lower()
                 detail = (session.get("status_detail") or "").lower()
-                print(f"[{label}] Poll #{attempt}: status={status!r} detail={detail!r}")
+                log.debug(
+                    "Poll #%d: status=%r detail=%r", attempt, status, detail,
+                )
                 if status not in _NON_TERMINAL_STATUSES:
-                    print(f"[{label}] Poll #{attempt}: terminal status reached ({status!r})")
+                    log.info(
+                        "Poll #%d: terminal status reached (%r)",
+                        attempt, status,
+                    )
                     return session
                 if detail in _WORK_PRODUCT_READY_DETAILS:
-                    print(
-                        f"[{label}] Poll #{attempt}: Devin work product ready "
-                        f"(status={status!r}, detail={detail!r})"
+                    log.info(
+                        "Poll #%d: Devin work product ready "
+                        "(status=%r, detail=%r)",
+                        attempt, status, detail,
                     )
                     return session
             else:
-                print(f"[{label}] Poll #{attempt}: HTTP {response.status_code}")
+                log.warning(
+                    "Poll #%d: HTTP %s", attempt, response.status_code,
+                )
         except requests.exceptions.RequestException as e:
-            print(f"[{label}] Poll #{attempt}: request error — {e}")
+            log.warning("Poll #%d: request error — %s", attempt, e)
 
         time.sleep(poll_interval)
 
-    print(f"[{label}] Timed out after {timeout}s ({attempt} polls)")
+    log.warning("Timed out after %ds (%d polls)", timeout, attempt)
     return None
 
 
@@ -151,6 +176,7 @@ def fetch_messages(session_id: str, label: str = "devin_client") -> list:
     Paginates through ``?first=200`` pages up to ``max_pages=20``. Returns a
     list of message dicts in chronological order; may be empty on error.
     """
+    log = _label_logger(label)
     url = f"{DEVIN_API_BASE}/sessions/{session_id}/messages"
     headers = _auth_headers()
     messages: list = []
@@ -165,12 +191,12 @@ def fetch_messages(session_id: str, label: str = "devin_client") -> list:
         try:
             response = requests.get(url, headers=headers, params=params, timeout=20)
         except requests.exceptions.RequestException as e:
-            print(f"[{label}] fetch_messages: request error — {e}")
+            log.warning("fetch_messages: request error — %s", e)
             break
         if response.status_code != 200:
-            print(
-                f"[{label}] fetch_messages: HTTP {response.status_code} "
-                f"— {response.text[:200]}"
+            log.warning(
+                "fetch_messages: HTTP %s — %s",
+                response.status_code, response.text[:200],
             )
             break
         payload = response.json()

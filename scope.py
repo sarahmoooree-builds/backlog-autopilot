@@ -16,6 +16,8 @@ It does NOT write code or open PRs.
 Output is saved to store.py (scope_plans section).
 """
 
+import logging
+
 import requests
 from datetime import datetime
 
@@ -23,6 +25,8 @@ import devin_client
 import store
 from config import POLL_INTERVAL, SCOPE_TIMEOUT, TARGET_REPO
 from prompts import SCOPE_PROMPT
+
+logger = logging.getLogger(__name__)
 
 
 def scope_issue(planned_issue: dict) -> dict:
@@ -40,7 +44,7 @@ def scope_issue(planned_issue: dict) -> dict:
     prompt = _build_scope_prompt(planned_issue)
 
     # --- Step 1: Create the scope session ---
-    print(f"[scope] Creating Devin session for issue #{issue_id}...")
+    logger.info("Creating Devin session for issue #%s...", issue_id)
     try:
         created = devin_client.create_session(prompt, bypass_approval=True)
     except requests.exceptions.RequestException as e:
@@ -60,7 +64,7 @@ def scope_issue(planned_issue: dict) -> dict:
         store.set_scope_plan(issue_id, err)
         return err
 
-    print(f"[scope] Session created: {session_url}")
+    logger.info("Session created: %s", session_url)
 
     # --- Step 2: Save pending state immediately so UI shows progress ---
     pending = _pending_plan(issue_id, session_id, session_url)
@@ -91,16 +95,19 @@ def scope_issue(planned_issue: dict) -> dict:
     final_status = (result.get("status") or "").lower()
     final_detail = (result.get("status_detail") or "").lower()
     has_structured_output = bool(result.get("structured_output"))
-    print(
-        f"[scope] Session terminal state for issue #{issue_id}: "
-        f"status={final_status!r} detail={final_detail!r} "
-        f"structured_output_present={has_structured_output}"
+    logger.info(
+        "Session terminal state for issue #%s: status=%r detail=%r "
+        "structured_output_present=%s",
+        issue_id, final_status, final_detail, has_structured_output,
     )
 
     messages = devin_client.fetch_messages(session_id, label="scope")
-    print(
-        f"[scope] Fetched {len(messages)} message(s) for issue #{issue_id} "
-        f"(devin-authored: {sum(1 for m in messages if (m.get('source') or '').lower() == 'devin')})"
+    devin_count = sum(
+        1 for m in messages if (m.get("source") or "").lower() == "devin"
+    )
+    logger.info(
+        "Fetched %d message(s) for issue #%s (devin-authored: %d)",
+        len(messages), issue_id, devin_count,
     )
 
     # Attempt extraction even when the session is still 'running' +
@@ -123,9 +130,10 @@ def scope_issue(planned_issue: dict) -> dict:
             " (session awaiting further instructions)"
             if final_detail == "waiting_for_user" else ""
         )
-        print(
-            f"[scope] Could not parse scope JSON for issue #{issue_id} "
-            f"— recording error. status={final_status!r} detail={final_detail!r}"
+        logger.warning(
+            "Could not parse scope JSON for issue #%s — recording error. "
+            "status=%r detail=%r",
+            issue_id, final_status, final_detail,
         )
         err = _error_plan(
             issue_id, session_url,
@@ -136,9 +144,9 @@ def scope_issue(planned_issue: dict) -> dict:
         store.set_scope_plan(issue_id, err)
         return err
 
-    print(
-        f"[scope] Parsed scope JSON for issue #{issue_id} "
-        f"(status={final_status!r}, detail={final_detail!r})"
+    logger.info(
+        "Parsed scope JSON for issue #%s (status=%r, detail=%r)",
+        issue_id, final_status, final_detail,
     )
 
     scope_plan = {
@@ -151,8 +159,10 @@ def scope_issue(planned_issue: dict) -> dict:
         "scoped_at": datetime.now().isoformat(),
     }
     store.set_scope_plan(issue_id, scope_plan)
-    print(f"[scope] Issue #{issue_id} scoped. "
-          f"Confidence: {plan_data.get('confidence_score')}/100")
+    logger.info(
+        "Issue #%s scoped. Confidence: %s/100",
+        issue_id, plan_data.get("confidence_score"),
+    )
     return scope_plan
 
 

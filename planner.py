@@ -21,13 +21,23 @@ Output: list[PlannedIssue] sorted by (tier, -score_within_tier).
 """
 
 import json
+import logging
 import re
+
 import requests
 from datetime import datetime
 
 import devin_client
 from config import PLANNER_TIMEOUT, POLL_INTERVAL
 from priorities import PlannerStrategy, get_strategy, BALANCED_INTENT
+
+logger = logging.getLogger(__name__)
+# Top-level logger for the Devin-powered analysis path so its lines are
+# distinguishable from the rule-based planner path in log output. Uses the
+# bare name ``"analyse"`` so it matches the logger that ``devin_client``
+# routes to when called with ``label="analyse"`` — otherwise logs from the
+# same stage would split across ``planner.analyse`` and ``analyse``.
+analyse_logger = logging.getLogger("analyse")
 
 # ---------------------------------------------------------------------------
 # Configurable PM weights
@@ -624,7 +634,7 @@ def plan_issues_with_devin(ingested: list) -> dict:
         issues_json=issues_json,
     )
 
-    print(f"[planner] Creating Devin planner session for {len(ingested)} issues…")
+    logger.info("Creating Devin planner session for %d issues…", len(ingested))
     try:
         created = devin_client.create_session(prompt, bypass_approval=True)
     except requests.exceptions.RequestException as e:
@@ -636,7 +646,7 @@ def plan_issues_with_devin(ingested: list) -> dict:
 
     session_id  = created["session_id"]
     session_url = created["session_url"]
-    print(f"[planner] Session created: {session_url}")
+    logger.info("Session created: %s", session_url)
 
     result = devin_client.poll_until_done(
         session_id,
@@ -678,7 +688,7 @@ def plan_issues_with_devin(ingested: list) -> dict:
     # Sort by total_score descending (Devin may have already ranked, but ensure it)
     planned.sort(key=lambda x: x["planner_score"]["total_score"], reverse=True)
 
-    print(f"[planner] Done — {len(planned)} issues prioritised by Devin.")
+    logger.info("Done — %d issues prioritised by Devin.", len(planned))
     return {
         "status": "complete",
         "session_id": session_id,
@@ -714,7 +724,7 @@ def analyse_issues_with_devin(raw_issues: list) -> dict:
         issues_json=issues_json,
     )
 
-    print(f"[analyse] Creating Devin analysis session for {len(raw_issues)} issues…")
+    analyse_logger.info("Creating Devin analysis session for %d issues…", len(raw_issues))
     try:
         created = devin_client.create_session(prompt, bypass_approval=True)
     except requests.exceptions.RequestException as e:
@@ -726,7 +736,7 @@ def analyse_issues_with_devin(raw_issues: list) -> dict:
 
     session_id  = created["session_id"]
     session_url = created["session_url"]
-    print(f"[analyse] Session created: {session_url}")
+    analyse_logger.info("Session created: %s", session_url)
 
     result = devin_client.poll_until_done(
         session_id,
@@ -778,7 +788,7 @@ def analyse_issues_with_devin(raw_issues: list) -> dict:
     # Ensure sorted by priority_rank
     planned.sort(key=lambda x: x["planner_score"]["priority_rank"])
 
-    print(f"[analyse] Done — {len(planned)} issues analysed by Devin.")
+    analyse_logger.info("Done — %d issues analysed by Devin.", len(planned))
     return {
         "status":      "complete",
         "session_id":  session_id,
