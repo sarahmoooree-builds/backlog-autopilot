@@ -543,10 +543,16 @@ def _build_devin_planner_score(item: dict) -> dict:
     else:
         ease = 5
 
-    score_within_tier = item.get(
+    score_within_tier = float(item.get(
         "score_within_tier",
         item.get("total_score", 0.0),
-    )
+    ))
+    tier = int(item.get("tier", 3))
+    # Derive total_score from (tier, score_within_tier) so tier-1 records always
+    # sort above tier-3 records under total_score-desc ordering — regardless of
+    # what Devin returned for total_score. This keeps the rule-based and
+    # Devin-powered paths consistent.
+    total_score = _derive_total_score(tier, score_within_tier)
 
     return {
         "severity":              _clamp(severity),
@@ -555,10 +561,10 @@ def _build_devin_planner_score(item: dict) -> dict:
         "ease":                  _clamp(ease),
         "confidence":            _clamp(item.get("confidence", 4)),
         "urgency":               _clamp(item.get("urgency", 5)),
-        "tier":                  int(item.get("tier", 3)),
+        "tier":                  tier,
         "tier_reason":           item.get("tier_reason", "Devin-scored"),
-        "score_within_tier":     float(score_within_tier),
-        "total_score":           float(item.get("total_score", 0.0)),
+        "score_within_tier":     score_within_tier,
+        "total_score":           total_score,
         "recommended":           bool(item.get("recommended", False)),
         "recommendation_reason": item.get("recommendation_reason", ""),
         "priority_rank":         int(item.get("priority_rank", 0)),

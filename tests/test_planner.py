@@ -6,6 +6,7 @@ import pytest
 
 from planner import (
     DEFAULT_WEIGHTS,
+    _build_devin_planner_score,
     apply_refinement,
     compute_tier_score,
     compute_total_score,
@@ -416,6 +417,37 @@ class TestMigrateLegacyScore:
 # ---------------------------------------------------------------------------
 # compute_total_score — deprecated legacy weighted sum kept for back-compat
 # ---------------------------------------------------------------------------
+
+class TestBuildDevinPlannerScore:
+    """Devin-produced records must sort consistently with rule-based ones."""
+
+    def test_tier1_total_score_beats_tier3_regardless_of_devin_value(self):
+        # Devin returns a tier-1 item with a low total_score and a tier-3 item
+        # with a higher total_score. After we derive total_score from tier,
+        # the tier-1 item MUST still sort above the tier-3 item.
+        tier1 = _build_devin_planner_score(
+            {"tier": 1, "score_within_tier": 5.0, "total_score": 2.0}
+        )
+        tier3 = _build_devin_planner_score(
+            {"tier": 3, "score_within_tier": 9.0, "total_score": 9.0}
+        )
+        assert tier1["total_score"] > tier3["total_score"]
+
+    def test_missing_total_score_is_derived(self):
+        ps = _build_devin_planner_score({"tier": 1, "score_within_tier": 8.0})
+        # A tier-1 item with any positive score_within_tier should beat a
+        # tier-4 record with score_within_tier=10.
+        tier4 = _build_devin_planner_score(
+            {"tier": 4, "score_within_tier": 10.0}
+        )
+        assert ps["total_score"] > tier4["total_score"]
+
+    def test_legacy_effort_is_inverted_to_ease(self):
+        ps = _build_devin_planner_score({"effort": 2})
+        assert ps["ease"] == 8
+        # Legacy proxy `effort` is also re-populated for backward-compat UI.
+        assert ps["effort"] == 2
+
 
 class TestComputeTotalScoreLegacy:
     def test_legacy_weighted_sum_still_works(self):
