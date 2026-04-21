@@ -39,7 +39,7 @@ from priorities import (
 )
 from scope import scope_issue, scope_issues
 from executor import execute_issues, refresh_session_statuses
-from optimizer import run_optimizer, get_optimizer_summary
+from optimizer import run_optimizer, run_optimizer_with_devin, get_optimizer_summary
 import store
 from store import (
     migrate_legacy_stores,
@@ -887,12 +887,32 @@ with tab_pipeline:
             "recurring patterns, and suggests scoring adjustments."
         )
 
-        opt_col, _ = st.columns([1.5, 8.5])
-        with opt_col:
+        opt_mode_col, opt_btn_col, _ = st.columns([2.5, 2, 5.5])
+        with opt_mode_col:
+            opt_mode_label = st.radio(
+                "Optimizer mode",
+                ["Rule-based (fast)", "Devin-powered (thorough)"],
+                index=0,
+                horizontal=True,
+                help=(
+                    "Rule-based runs locally in seconds using proxy deltas. "
+                    "Devin-powered dispatches a Devin session that reads real "
+                    "PR diffs and blocked-session logs — takes several minutes."
+                ),
+                key="optimizer_mode_radio",
+            )
+        with opt_btn_col:
             if st.button("Run optimizer"):
                 try:
-                    with st.spinner("Analysing completed sessions…"):
-                        new_records = run_optimizer()
+                    if opt_mode_label.startswith("Devin"):
+                        with st.spinner(
+                            "Dispatching Devin optimizer — reading PR diffs "
+                            "and session logs (this can take several minutes)…"
+                        ):
+                            new_records = run_optimizer_with_devin()
+                    else:
+                        with st.spinner("Analysing completed sessions…"):
+                            new_records = run_optimizer()
                     st.success(f"Analysed {len(new_records)} new session(s).")
                     st.rerun()
                 except Exception as e:
@@ -907,6 +927,13 @@ with tab_pipeline:
             o4.metric("Avg scope confidence",
                       f"{summary.get('avg_scope_confidence', 0):.0f}/100")
 
+            mb = summary.get("mode_breakdown") or {}
+            if mb.get("devin") and mb.get("rule"):
+                st.caption(
+                    f"Records by mode — rule-based: {mb['rule']} · "
+                    f"Devin-powered: {mb['devin']}"
+                )
+
             if summary.get("top_patterns"):
                 st.markdown("**Recurring patterns**")
                 for tag, count in summary["top_patterns"]:
@@ -919,13 +946,28 @@ with tab_pipeline:
 
             with st.expander("All optimization records"):
                 for rec in opt_records:
+                    mode = rec.get("optimizer_mode", "rule")
                     st.markdown(
                         f"**Issue #{rec['issue_id']}** — {rec['actual_status']} — "
-                        f"accuracy: `{rec['estimation_accuracy']}`"
+                        f"accuracy: `{rec['estimation_accuracy']}` — mode: `{mode}`"
                     )
                     st.caption(rec["optimizer_notes"])
                     if rec.get("pattern_tags"):
                         st.markdown("Tags: " + ", ".join(f"`{t}`" for t in rec["pattern_tags"]))
+                    if mode == "devin":
+                        if rec.get("actual_lines_changed") is not None:
+                            st.markdown(
+                                f"Real diff: **{rec['actual_lines_changed']} lines** "
+                                f"across {len(rec.get('actual_files_changed') or [])} file(s)"
+                            )
+                        if rec.get("failure_root_cause"):
+                            st.warning(
+                                f"Root cause: {rec['failure_root_cause']}"
+                            )
+                        if rec.get("session_url"):
+                            st.markdown(
+                                f"[View Devin optimizer session]({rec['session_url']})"
+                            )
                     st.markdown("---")
 
 
