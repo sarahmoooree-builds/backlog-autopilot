@@ -189,8 +189,11 @@ manual_recommended = [i for i in planned_issues if not i["planner_score"]["recom
 if "selected_ids" not in st.session_state:
     st.session_state.selected_ids = set()
 # Migrate old key name if present from an earlier session
-if "approved_ids" in st.session_state and st.session_state.get("approved_ids"):
-    st.session_state.selected_ids |= set(st.session_state["approved_ids"])
+if "approved_ids" in st.session_state:
+    legacy = st.session_state.get("approved_ids") or set()
+    if legacy:
+        st.session_state.selected_ids |= set(legacy)
+    del st.session_state["approved_ids"]
 
 
 # ---------------------------------------------------------------------------
