@@ -16,7 +16,9 @@ import time
 import requests
 from datetime import datetime
 
+import store
 from config import DEVIN_API_BASE, DEVIN_API_KEY, PLANNER_TIMEOUT, POLL_INTERVAL
+from notifications import notify_approval_needed
 from priorities import PlannerStrategy, get_strategy, BALANCED_INTENT
 
 # ---------------------------------------------------------------------------
@@ -301,7 +303,34 @@ def plan_issues(ingested: list, weights: dict = None,
     for rank, issue in enumerate(scored, start=1):
         issue["planner_score"]["priority_rank"] = rank
 
+    _notify_newly_recommended(scored)
+
     return scored
+
+
+def _notify_newly_recommended(scored: list) -> None:
+    """Send an approval-needed Slack notification for any issue that crossed
+    ``RECOMMEND_THRESHOLD`` since the last time we planned. Newly-recommended
+    IDs are tracked in ``pipeline_meta`` so repeat calls from the Streamlit
+    cache don't re-notify on every 60-second refresh.
+    """
+    recommended_ids = sorted(
+        issue["id"] for issue in scored
+        if issue["planner_score"]["recommended"]
+    )
+    if not recommended_ids:
+        return
+
+    meta = store.get_pipeline_meta("notifications") or {}
+    already = set(meta.get("notified_approval_ids", []))
+    new_ids = [i for i in recommended_ids if i not in already]
+    if not new_ids:
+        return
+
+    if notify_approval_needed(new_ids):
+        meta["notified_approval_ids"] = sorted(already | set(new_ids))
+        meta["last_notified_at"] = datetime.now().isoformat()
+        store.set_pipeline_meta("notifications", meta)
 
 
 # ---------------------------------------------------------------------------

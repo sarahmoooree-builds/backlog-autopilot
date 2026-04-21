@@ -17,6 +17,7 @@ from datetime import datetime
 
 import store
 from config import DEVIN_API_BASE, DEVIN_API_KEY, TARGET_REPO
+from notifications import notify_blocked, notify_completion
 from prompts import EXECUTION_PROMPT
 
 
@@ -100,9 +101,40 @@ def refresh_session_statuses() -> list:
             session["outcome_summary"] = outcome
             session["pull_requests"] = prs
 
+            _maybe_notify_status_change(session["issue_id"], new_status, session)
+
         updated.append(session)
 
     return updated
+
+
+def _maybe_notify_status_change(issue_id: int, new_status: str, session: dict) -> None:
+    """Fire Slack notifications the first time a session enters a terminal
+    state. We persist a ``notified`` dict on the execution record so repeated
+    ``refresh_session_statuses()`` calls don't spam the channel.
+    """
+    if new_status not in ("Completed", "Blocked"):
+        return
+
+    record = store.get_execution(issue_id)
+    if record is None:
+        return
+
+    notified = record.get("notified") or {}
+    key = new_status.lower()
+    if notified.get(key):
+        return
+
+    session_url = record.get("session_url") or session.get("session_url") or ""
+    if new_status == "Completed":
+        sent = notify_completion(issue_id, session_url)
+    else:
+        sent = notify_blocked(issue_id, session_url)
+
+    if sent:
+        notified[key] = datetime.now().isoformat()
+        record["notified"] = notified
+        store.set_execution(issue_id, record)
 
 
 # ---------------------------------------------------------------------------
