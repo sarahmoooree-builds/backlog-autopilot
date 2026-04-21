@@ -132,7 +132,7 @@ without a human selecting issues and clicking "Scope selected issues".
   - Dependencies (other issues/PRs this work depends on)
   - Risks (blast radius, edge cases, test gaps)
 - Saves a `pending` record immediately so the UI shows progress during polling
-- Polls for up to 6 minutes (360s), then saves an error record if timeout
+- Polls for up to 10 minutes (600s), then saves an error record if timeout
 
 **What it does NOT do:** write code, open PRs, invent strategy
 

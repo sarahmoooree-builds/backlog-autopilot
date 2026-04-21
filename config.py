@@ -67,7 +67,7 @@ DEVIN_API_BASE = f"https://api.devin.ai/v3/organizations/{DEVIN_ORG_ID}"
 # Timeouts (seconds)
 INGEST_TIMEOUT = int(os.getenv("INGEST_TIMEOUT", "480"))
 PLANNER_TIMEOUT = int(os.getenv("PLANNER_TIMEOUT", "480"))
-SCOPE_TIMEOUT = int(os.getenv("SCOPE_TIMEOUT", "360"))
+SCOPE_TIMEOUT = int(os.getenv("SCOPE_TIMEOUT", "600"))
 OPTIMIZER_TIMEOUT = int(os.getenv("OPTIMIZER_TIMEOUT", "480"))
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 
