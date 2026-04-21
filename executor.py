@@ -12,20 +12,14 @@ instead of guessing.
 Requires a complete ScopePlan in the store before dispatching.
 """
 
-import os
 import requests
 from datetime import datetime
-from dotenv import load_dotenv
 
+import devin_client
 import store
 from prompts import EXECUTION_PROMPT
 
-load_dotenv()
-DEVIN_API_KEY = os.getenv("DEVIN_API_KEY")
-DEVIN_ORG_ID = os.getenv("DEVIN_ORG_ID")
-
 TARGET_REPO = "sarahmoooree-builds/finserv-platform"
-DEVIN_API_BASE = f"https://api.devin.ai/v3/organizations/{DEVIN_ORG_ID}"
 
 
 def execute_issues(planned_issues: list) -> list:
@@ -94,7 +88,7 @@ def refresh_session_statuses() -> list:
             updated.append(session)
             continue
 
-        live_data = _poll_session(session_id)
+        live_data = devin_client.get_session(session_id)
         if live_data:
             new_status = _map_devin_status(live_data)
             outcome = _build_outcome_summary(live_data)
@@ -158,67 +152,8 @@ def _create_devin_session(planned_issue: dict, scope_plan: dict) -> dict:
     issue_id = planned_issue["id"]
     prompt = _build_prompt(planned_issue, scope_plan)
 
-    headers = {
-        "Authorization": f"Bearer {DEVIN_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
     try:
-        response = requests.post(
-            f"{DEVIN_API_BASE}/sessions",
-            headers=headers,
-            json={"prompt": prompt, "bypass_approval": True},
-            timeout=30,
-        )
-
-        if response.status_code in (200, 201):
-            data = response.json()
-            session_id = data.get("session_id", "unknown")
-            session_url = data.get("url", f"https://app.devin.ai/sessions/{session_id}")
-            status = "In Progress"
-            outcome = (
-                f"Devin session created. Session ID: {session_id}. "
-                f"Devin is implementing the Scope plan against {TARGET_REPO}."
-            )
-
-            # Save to persistent store, carrying Scope estimates for Optimizer
-            store.set_execution(issue_id, {
-                "issue_id": issue_id,
-                "session_id": session_id,
-                "session_url": session_url,
-                "status": status,
-                "outcome_summary": outcome,
-                "pull_requests": [],
-                "dispatched_at": datetime.now().isoformat(),
-                "completed_at": None,
-                "estimated_lines_changed": scope_plan.get("estimated_lines_changed", 0),
-                "estimated_files": scope_plan.get("affected_files", []),
-            })
-
-            return {
-                "id": issue_id,
-                "title": planned_issue["title"],
-                "status": status,
-                "outcome_summary": outcome,
-                "session_url": session_url,
-                "already_dispatched": False,
-            }
-
-        else:
-            status = "Blocked"
-            outcome = (
-                f"Failed to create Devin session. "
-                f"API returned status {response.status_code}: {response.text[:200]}"
-            )
-            return {
-                "id": issue_id,
-                "title": planned_issue["title"],
-                "status": status,
-                "outcome_summary": outcome,
-                "session_url": None,
-                "already_dispatched": False,
-            }
-
+        created = devin_client.create_session(prompt, bypass_approval=True)
     except requests.exceptions.RequestException as e:
         return {
             "id": issue_id,
@@ -228,22 +163,46 @@ def _create_devin_session(planned_issue: dict, scope_plan: dict) -> dict:
             "session_url": None,
             "already_dispatched": False,
         }
+    except RuntimeError as e:
+        return {
+            "id": issue_id,
+            "title": planned_issue["title"],
+            "status": "Blocked",
+            "outcome_summary": f"Failed to create Devin session. {str(e)}",
+            "session_url": None,
+            "already_dispatched": False,
+        }
 
+    session_id = created["session_id"] or "unknown"
+    session_url = created["session_url"]
+    status = "In Progress"
+    outcome = (
+        f"Devin session created. Session ID: {session_id}. "
+        f"Devin is implementing the Scope plan against {TARGET_REPO}."
+    )
 
-def _poll_session(session_id: str):
-    """GET the current state of a Devin session. Returns raw API dict or None."""
-    headers = {"Authorization": f"Bearer {DEVIN_API_KEY}"}
-    try:
-        response = requests.get(
-            f"{DEVIN_API_BASE}/sessions/{session_id}",
-            headers=headers,
-            timeout=15,
-        )
-        if response.status_code == 200:
-            return response.json()
-    except requests.exceptions.RequestException:
-        pass
-    return None
+    # Save to persistent store, carrying Scope estimates for Optimizer
+    store.set_execution(issue_id, {
+        "issue_id": issue_id,
+        "session_id": session_id,
+        "session_url": session_url,
+        "status": status,
+        "outcome_summary": outcome,
+        "pull_requests": [],
+        "dispatched_at": datetime.now().isoformat(),
+        "completed_at": None,
+        "estimated_lines_changed": scope_plan.get("estimated_lines_changed", 0),
+        "estimated_files": scope_plan.get("affected_files", []),
+    })
+
+    return {
+        "id": issue_id,
+        "title": planned_issue["title"],
+        "status": status,
+        "outcome_summary": outcome,
+        "session_url": session_url,
+        "already_dispatched": False,
+    }
 
 
 def _map_devin_status(session_data: dict) -> str:
