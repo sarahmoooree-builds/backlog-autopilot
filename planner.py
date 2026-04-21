@@ -493,12 +493,16 @@ def plan_issues(ingested: list, weights: dict = None,
 
     # Primary sort is tier (ascending — T1 first); within a tier,
     # higher score_within_tier wins.
-    _reorder_by_tier(scored)
+    reorder_by_tier(scored)
     return scored
 
 
-def _reorder_by_tier(issues: list) -> list:
-    """Sort by (tier, -score_within_tier) and re-assign priority_rank in place."""
+def reorder_by_tier(issues: list) -> list:
+    """Sort by (tier, -score_within_tier) and re-assign priority_rank in place.
+
+    Public so callers outside of plan_issues (e.g. app.load_and_plan's
+    Devin-path) can share the same ordering + rank-reassignment logic.
+    """
     issues.sort(key=lambda x: (
         x["planner_score"]["tier"],
         -x["planner_score"]["score_within_tier"],
@@ -506,6 +510,10 @@ def _reorder_by_tier(issues: list) -> list:
     for rank, issue in enumerate(issues, start=1):
         issue["planner_score"]["priority_rank"] = rank
     return issues
+
+
+# Backward-compat alias: earlier internal callers referenced _reorder_by_tier.
+_reorder_by_tier = reorder_by_tier
 
 
 def apply_refinement(issues: list, refinement_text: str) -> list:

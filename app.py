@@ -33,6 +33,7 @@ from planner import (
     plan_issues,
     analyse_issues_with_devin,
     migrate_legacy_score,
+    reorder_by_tier,
     BUSINESS_LABELS,
 )
 from priorities import (
@@ -158,16 +159,9 @@ def load_and_plan(intent: str, ingest_mode: str, planner_mode: str):
                     rec.get("planner_score", {}) or {}
                 )
             # Match the rule-based path: tier ascending (T1 first), then
-            # score_within_tier descending. Sorting by total_score alone would
-            # mix legacy tier-3 records (preserved raw score) above new tier-1
-            # records whose total_score is derived from (tier, score_within_tier).
-            return sorted(
-                records,
-                key=lambda x: (
-                    x["planner_score"]["tier"],
-                    -x["planner_score"]["score_within_tier"],
-                ),
-            )
+            # score_within_tier descending, re-assigning priority_rank so the
+            # UI "Priority: #N" badge matches the visible order.
+            return reorder_by_tier(records)
 
     if ingest_mode == "devin":
         ingested = store.all_records("ingested")
