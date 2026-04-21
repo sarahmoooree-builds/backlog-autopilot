@@ -24,6 +24,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 import store
+from config import SESSION
 from prompts import SCOPE_PROMPT
 
 load_dotenv()
@@ -59,7 +60,7 @@ def scope_issue(planned_issue: dict) -> dict:
     # --- Step 1: Create the scope session ---
     print(f"[scope] Creating Devin session for issue #{issue_id}...")
     try:
-        response = requests.post(
+        response = SESSION.post(
             f"{DEVIN_API_BASE}/sessions",
             headers=headers,
             json={"prompt": prompt, "bypass_approval": True},
@@ -276,7 +277,7 @@ def _poll_until_done(session_id: str, headers: dict):
     while time.time() < deadline:
         attempt += 1
         try:
-            response = requests.get(
+            response = SESSION.get(
                 f"{DEVIN_API_BASE}/sessions/{session_id}",
                 headers=headers,
                 timeout=15,
@@ -325,7 +326,7 @@ def _fetch_messages(session_id: str, headers: dict) -> list:
         if cursor:
             params["after"] = cursor
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=20)
+            response = SESSION.get(url, headers=headers, params=params, timeout=20)
         except requests.exceptions.RequestException as e:
             print(f"[scope] _fetch_messages: request error — {e}")
             break

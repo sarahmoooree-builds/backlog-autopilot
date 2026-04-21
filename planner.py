@@ -18,6 +18,7 @@ import requests
 from datetime import datetime
 from dotenv import load_dotenv
 
+from config import SESSION
 from priorities import PlannerStrategy, get_strategy, BALANCED_INTENT
 
 load_dotenv()
@@ -348,7 +349,7 @@ def plan_issues_with_devin(ingested: list) -> dict:
 
     print(f"[planner] Creating Devin planner session for {len(ingested)} issues…")
     try:
-        response = requests.post(
+        response = SESSION.post(
             f"{_DEVIN_API_BASE}/sessions",
             headers=headers,
             json={"prompt": prompt, "bypass_approval": True},
@@ -378,7 +379,7 @@ def plan_issues_with_devin(ingested: list) -> dict:
     while time.time() < deadline:
         attempt += 1
         try:
-            r = requests.get(
+            r = SESSION.get(
                 f"{_DEVIN_API_BASE}/sessions/{session_id}",
                 headers={"Authorization": f"Bearer {_DEVIN_API_KEY}"},
                 timeout=15,
@@ -552,7 +553,7 @@ def analyse_issues_with_devin(raw_issues: list) -> dict:
 
     print(f"[analyse] Creating Devin analysis session for {len(raw_issues)} issues…")
     try:
-        response = requests.post(
+        response = SESSION.post(
             f"{_DEVIN_API_BASE}/sessions",
             headers=headers,
             json={"prompt": prompt, "bypass_approval": True},
@@ -580,7 +581,7 @@ def analyse_issues_with_devin(raw_issues: list) -> dict:
     while time.time() < deadline:
         attempt += 1
         try:
-            r = requests.get(
+            r = SESSION.get(
                 f"{_DEVIN_API_BASE}/sessions/{session_id}",
                 headers={"Authorization": f"Bearer {_DEVIN_API_KEY}"},
                 timeout=15,
@@ -678,7 +679,7 @@ def _fetch_and_extract_messages(session_id: str, label: str = "planner"):
     ]
     for url in endpoints:
         try:
-            r = requests.get(
+            r = SESSION.get(
                 url,
                 headers={"Authorization": f"Bearer {_DEVIN_API_KEY}"},
                 timeout=15,

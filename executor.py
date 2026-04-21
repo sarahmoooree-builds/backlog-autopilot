@@ -18,6 +18,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 import store
+from config import SESSION
 from prompts import EXECUTION_PROMPT
 
 load_dotenv()
@@ -164,7 +165,7 @@ def _create_devin_session(planned_issue: dict, scope_plan: dict) -> dict:
     }
 
     try:
-        response = requests.post(
+        response = SESSION.post(
             f"{DEVIN_API_BASE}/sessions",
             headers=headers,
             json={"prompt": prompt, "bypass_approval": True},
@@ -234,7 +235,7 @@ def _poll_session(session_id: str):
     """GET the current state of a Devin session. Returns raw API dict or None."""
     headers = {"Authorization": f"Bearer {DEVIN_API_KEY}"}
     try:
-        response = requests.get(
+        response = SESSION.get(
             f"{DEVIN_API_BASE}/sessions/{session_id}",
             headers=headers,
             timeout=15,

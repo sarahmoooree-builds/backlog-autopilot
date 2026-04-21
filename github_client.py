@@ -10,6 +10,8 @@ from datetime import datetime, timezone, timedelta
 
 import requests
 
+from config import SESSION
+
 # The repo Backlog Autopilot monitors
 REPO = "sarahmoooree-builds/finserv-platform"
 
@@ -44,7 +46,7 @@ def _paginate(url, headers=None, params=None):
     next_params = params
 
     while next_url:
-        response = requests.get(next_url, headers=headers, params=next_params, timeout=30)
+        response = SESSION.get(next_url, headers=headers, params=next_params, timeout=30)
         if not response.ok:
             raise RuntimeError(
                 f"GitHub API request failed: {response.status_code} "

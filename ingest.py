@@ -15,6 +15,8 @@ from datetime import datetime
 from typing import Optional
 from dotenv import load_dotenv
 
+from config import SESSION
+
 load_dotenv()
 _DEVIN_API_KEY = os.getenv("DEVIN_API_KEY")
 _DEVIN_ORG_ID  = os.getenv("DEVIN_ORG_ID")
@@ -229,7 +231,7 @@ def ingest_issues_with_devin(raw_issues: list) -> dict:
 
     print(f"[ingest] Creating Devin ingest session for {len(raw_issues)} issues…")
     try:
-        response = requests.post(
+        response = SESSION.post(
             f"{_DEVIN_API_BASE}/sessions",
             headers=headers,
             json={"prompt": prompt, "bypass_approval": True},
@@ -262,7 +264,7 @@ def ingest_issues_with_devin(raw_issues: list) -> dict:
     while time.time() < deadline:
         attempt += 1
         try:
-            r = requests.get(
+            r = SESSION.get(
                 f"{_DEVIN_API_BASE}/sessions/{session_id}",
                 headers={"Authorization": f"Bearer {_DEVIN_API_KEY}"},
                 timeout=15,
@@ -405,7 +407,7 @@ def _fetch_and_extract_messages(session_id: str):
     ]
     for url in endpoints:
         try:
-            r = requests.get(
+            r = SESSION.get(
                 url,
                 headers={"Authorization": f"Bearer {_DEVIN_API_KEY}"},
                 timeout=15,
