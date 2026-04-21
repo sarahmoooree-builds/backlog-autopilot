@@ -18,6 +18,8 @@ import requests
 from datetime import datetime
 from dotenv import load_dotenv
 
+from priorities import PlannerStrategy, get_strategy, BALANCED_INTENT
+
 load_dotenv()
 _DEVIN_API_KEY  = os.getenv("DEVIN_API_KEY")
 _DEVIN_ORG_ID   = os.getenv("DEVIN_ORG_ID")
@@ -245,36 +247,54 @@ def recommend(total_score: float, issue: dict) -> tuple:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def plan_issues(ingested: list, weights: dict = None) -> list:
+def plan_issues(ingested: list, weights: dict = None,
+                strategy: PlannerStrategy = None) -> list:
     """
     Stage 2: Planner.
 
     Scores, ranks, and annotates each ingested issue.
     Returns a list of PlannedIssue dicts sorted by total_score descending
     (priority_rank 1 = highest priority).
+
+    Two ways to steer the ranking:
+        - `strategy`: a PlannerStrategy bundling weights + small per-issue
+          score bonuses. Produced by priorities.get_strategy() from a parsed
+          natural-language prioritization goal. Preferred.
+        - `weights`: raw weight dict (legacy). Used when `strategy` is None.
+
+    When both are omitted the balanced default is applied.
     """
-    if weights is None:
-        weights = DEFAULT_WEIGHTS
+    if strategy is None and weights is None:
+        strategy = get_strategy(BALANCED_INTENT)
+
+    if strategy is not None:
+        active_weights = strategy.weights
+    else:
+        active_weights = weights
 
     scored = []
 
     for issue in ingested:
-        ui = score_user_impact(issue)
-        bi = score_business_impact(issue)
-        ef = score_effort(issue)
-        co = score_confidence(issue)
-        total = compute_total_score({"user_impact": ui, "business_impact": bi,
-                                     "effort": ef, "confidence": co}, weights)
+        base_scores = {
+            "user_impact":     score_user_impact(issue),
+            "business_impact": score_business_impact(issue),
+            "effort":          score_effort(issue),
+            "confidence":      score_confidence(issue),
+        }
+        if strategy is not None:
+            base_scores = strategy.apply_bonuses(base_scores, issue)
+
+        total = compute_total_score(base_scores, active_weights)
         recommended, reason = recommend(total, issue)
         options = generate_implementation_options(issue) if recommended else []
 
         scored.append({
             **issue,
             "planner_score": {
-                "user_impact":          ui,
-                "business_impact":      bi,
-                "effort":               ef,
-                "confidence":           co,
+                "user_impact":          base_scores["user_impact"],
+                "business_impact":      base_scores["business_impact"],
+                "effort":               base_scores["effort"],
+                "confidence":           base_scores["confidence"],
                 "total_score":          total,
                 "recommended":          recommended,
                 "recommendation_reason": reason,
