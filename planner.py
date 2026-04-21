@@ -52,7 +52,7 @@ RECOMMEND_THRESHOLD = 6.0
 # self-contained; priorities.py has its own tier-policy sets.
 PRIORITY_LABELS = {"p1", "priority-high", "customer-facing", "revenue", "sla", "critical"}
 BUSINESS_LABELS = {"revenue", "billing", "compliance", "customer-facing", "sla", "p1"}
-_CRITICAL_LABELS = {"critical", "p1", "sla"}
+_CRITICAL_LABELS = {"critical", "p1", "priority-high", "sla"}
 _CUSTOMER_FACING_LABELS = {"customer-facing", "customer", "ux"}
 
 
@@ -308,6 +308,14 @@ def migrate_legacy_score(planner_score: dict) -> dict:
     planner_score.setdefault("tier", 3)
     planner_score.setdefault("tier_reason", "Legacy score — migrated on read")
     planner_score.setdefault("score_within_tier", float(total_score))
+
+    # Ensure downstream readers (e.g. app.load_and_plan sorting by
+    # planner_score["total_score"], card rendering reading "recommended")
+    # never KeyError on an empty or minimal stored dict.
+    planner_score.setdefault("total_score", float(total_score))
+    planner_score.setdefault("recommended", False)
+    planner_score.setdefault("recommendation_reason", "")
+    planner_score.setdefault("priority_rank", 0)
     return planner_score
 
 

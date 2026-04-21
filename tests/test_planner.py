@@ -407,8 +407,22 @@ class TestMigrateLegacyScore:
     def test_empty_dict_becomes_defaults(self):
         migrated = migrate_legacy_score({})
         for k in ("severity", "reach", "business_value", "ease",
-                  "urgency", "tier", "tier_reason", "score_within_tier"):
-            assert k in migrated
+                  "urgency", "tier", "tier_reason", "score_within_tier",
+                  "total_score", "recommended", "recommendation_reason",
+                  "priority_rank"):
+            assert k in migrated, f"missing {k}"
+
+    def test_migrated_dict_is_sortable_by_total_score(self):
+        # Regression: stored records with null/empty planner_score must not
+        # KeyError when load_and_plan sorts by planner_score["total_score"].
+        records = [
+            {"planner_score": migrate_legacy_score({})},
+            {"planner_score": migrate_legacy_score({"total_score": 6.0,
+                                                    "user_impact": 7})},
+        ]
+        records.sort(key=lambda r: r["planner_score"]["total_score"],
+                     reverse=True)
+        assert records[0]["planner_score"]["total_score"] == 6.0
 
     def test_non_dict_is_returned_unchanged(self):
         assert migrate_legacy_score(None) is None  # type: ignore[arg-type]
