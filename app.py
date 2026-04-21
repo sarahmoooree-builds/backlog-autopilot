@@ -29,7 +29,14 @@ from github_client import (
     fetch_merged_prs,
 )
 from ingest import ingest_issues
-from planner import plan_issues, analyse_issues_with_devin, DEFAULT_WEIGHTS
+from planner import plan_issues, analyse_issues_with_devin
+from priorities import (
+    BALANCED_INTENT,
+    describe_strategy,
+    get_strategy,
+    parse_prioritization_intent,
+    weight_highlights,
+)
 from scope import scope_issue, scope_issues
 from executor import execute_issues, refresh_session_statuses
 from optimizer import run_optimizer, get_optimizer_summary
@@ -100,22 +107,17 @@ st.markdown(
 
 
 # ---------------------------------------------------------------------------
-# Sidebar — Planner weight controls
+# Sidebar — pipeline overview only.
+# Prioritization is expressed through the natural-language input on the
+# Pipeline tab, not manual sliders.
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
-    st.header("⚙️ Settings")
-    st.caption("Adjust scoring priorities. Changes re-rank issues on next refresh.")
-    w_user = st.slider("User Impact",           0.0, 1.0, DEFAULT_WEIGHTS["user_impact"],      0.05)
-    w_biz  = st.slider("Business Impact",       0.0, 1.0, DEFAULT_WEIGHTS["business_impact"],  0.05)
-    w_eff  = st.slider("Effort (inverted)",     0.0, 1.0, DEFAULT_WEIGHTS["effort"],            0.05)
-    w_conf = st.slider("Automation Confidence", 0.0, 1.0, DEFAULT_WEIGHTS["confidence"],        0.05)
-    custom_weights = {
-        "user_impact":     w_user,
-        "business_impact": w_biz,
-        "effort":          w_eff,
-        "confidence":      w_conf,
-    }
+    st.header("Backlog Autopilot")
+    st.caption(
+        "Steer the Planner from the main tab by describing what you're "
+        "prioritizing in plain English — no manual weight tuning required."
+    )
     st.divider()
     st.caption("Pipeline: Ingest → Planner → Scope → Executor → Optimizer")
 
@@ -134,12 +136,12 @@ def get_pipeline_mode() -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# Load and plan issues (cached; weights + mode used as cache key)
+# Load and plan issues (cached; intent + mode used as cache key)
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=60)
-def load_and_plan(weights_tuple, ingest_mode: str, planner_mode: str):
-    WEIGHT_KEYS = ["user_impact", "business_impact", "effort", "confidence"]
+def load_and_plan(intent: str, ingest_mode: str, planner_mode: str):
+    strategy = get_strategy(intent)
 
     if planner_mode == "devin":
         records = store.all_records("planned")
@@ -149,13 +151,11 @@ def load_and_plan(weights_tuple, ingest_mode: str, planner_mode: str):
     if ingest_mode == "devin":
         ingested = store.all_records("ingested")
         if ingested:
-            weights = dict(zip(WEIGHT_KEYS, weights_tuple))
-            return plan_issues(ingested, weights=weights)
+            return plan_issues(ingested, strategy=strategy)
 
     raw = fetch_issues()
     ingested = ingest_issues(raw)
-    weights = dict(zip(WEIGHT_KEYS, weights_tuple))
-    return plan_issues(ingested, weights=weights)
+    return plan_issues(ingested, strategy=strategy)
 
 
 @st.cache_data(ttl=60)
@@ -180,9 +180,16 @@ def load_merged_prs(days: int = 30):
         return []
 
 
+# Prioritization state — interpreted intent drives the planner.
+if "prioritization_text" not in st.session_state:
+    st.session_state.prioritization_text = ""
+if "prioritization_intent" not in st.session_state:
+    st.session_state.prioritization_intent = BALANCED_INTENT
+
 ingest_mode, planner_mode = get_pipeline_mode()
-weights_tuple = (w_user, w_biz, w_eff, w_conf)
-planned_issues = load_and_plan(weights_tuple, ingest_mode, planner_mode)
+planned_issues = load_and_plan(
+    st.session_state.prioritization_intent, ingest_mode, planner_mode
+)
 auto_recommended = [i for i in planned_issues if i["planner_score"]["recommended"]]
 manual_recommended = [i for i in planned_issues if not i["planner_score"]["recommended"]]
 
@@ -293,7 +300,7 @@ st.divider()
 # Tabs
 # ---------------------------------------------------------------------------
 
-tab_pipeline, tab_business = st.tabs(["Pipeline", "Business Report"])
+tab_pipeline, tab_business = st.tabs(["Pipeline", "Business Impact"])
 
 
 # ===========================================================================
@@ -331,58 +338,72 @@ with tab_pipeline:
     st.markdown("")
 
     # -----------------------------------------------------------------------
-    # Issues resolved — REAL data (closed issues by day, last 30 days)
+    # Prioritization input — natural-language steering for Planner Devin.
+    # Replaces the "Issues resolved" chart here; that chart now lives on the
+    # Business Impact tab.
     # -----------------------------------------------------------------------
 
-    merged_prs = load_merged_prs(days=30)
+    def _apply_prioritization_text():
+        text = st.session_state.get("prioritization_input", "")
+        st.session_state.prioritization_text = text
+        st.session_state.prioritization_intent = parse_prioritization_intent(text)
+        load_and_plan.clear()
 
-    resolved_col, resolved_info = st.columns([6, 4])
-    with resolved_col:
-        st.subheader("Issues resolved · last 30 days")
-    with resolved_info:
+    with st.container(border=True):
+        st.subheader("What are you prioritizing?")
         st.caption(
-            f"Source: closed issues in `sarahmoooree-builds/finserv-platform`. "
-            f"{len(merged_prs)} PR(s) merged in the same window."
+            "Describe today's goal in plain English. We'll adjust issue scoring "
+            "automatically — no manual weight tuning."
+        )
+        st.text_input(
+            "Prioritization goal",
+            key="prioritization_input",
+            placeholder="e.g. I want to fix the worst bugs affecting users",
+            on_change=_apply_prioritization_text,
+            label_visibility="collapsed",
         )
 
-    if closed_recent:
-        # Bucket closed_at into calendar days (UTC).
-        rows = []
-        for c in closed_recent:
-            try:
-                dt = datetime.fromisoformat(c["closed_at"].replace("Z", "+00:00"))
-            except Exception:
-                continue
-            rows.append(dt.date())
+        active_intent = st.session_state.prioritization_intent
+        active_strategy = get_strategy(active_intent)
+        has_text = bool(st.session_state.get("prioritization_input", "").strip())
 
-        today = datetime.now(timezone.utc).date()
-        start = today - timedelta(days=29)
-        day_index = {start + timedelta(days=i): 0 for i in range(30)}
-        for d in rows:
-            if d in day_index:
-                day_index[d] += 1
-
-        chart_df = pd.DataFrame(
-            [{"Day": d.isoformat(), "Resolved": n} for d, n in day_index.items()]
-        )
-        chart = (
-            alt.Chart(chart_df)
-            .mark_bar(color="#1B7A8E")
-            .encode(
-                x=alt.X("Day:T", axis=alt.Axis(title=None, format="%b %d", labelAngle=0)),
-                y=alt.Y("Resolved:Q", title="Issues closed"),
-                tooltip=["Day:T", "Resolved:Q"],
+        summary_col, badges_col = st.columns([6, 4])
+        with summary_col:
+            if active_intent == BALANCED_INTENT and not has_text:
+                st.caption(
+                    f"**Default strategy — {active_strategy.label}.** "
+                    "Enter a goal above to re-rank the backlog."
+                )
+            else:
+                st.markdown(
+                    f"**{active_strategy.label}** — "
+                    f"{describe_strategy(active_intent).replace('Prioritizing: ', '')}"
+                )
+        with badges_col:
+            highlights = weight_highlights(active_intent, top_n=2)
+            badge_html = " ".join(
+                f"<span style='background:rgba(27,122,142,0.18); color:#7fd0df; "
+                f"padding:4px 10px; border-radius:12px; font-size:0.8em; "
+                f"margin-right:6px;'>{label} {pct}%</span>"
+                for label, pct in highlights
             )
-            .properties(height=230)
-        )
-        st.altair_chart(chart, use_container_width=True)
-    else:
-        st.info(
-            "No issues have been closed in the last 30 days on the target repo — "
-            "so there is no real trend to plot yet. The KPI cards above are grounded "
-            "in live counts; this chart will populate as issues are resolved."
-        )
+            st.markdown(
+                f"<div style='text-align:right'>{badge_html}</div>",
+                unsafe_allow_html=True,
+            )
 
+        if has_text:
+            if st.button("Reset to balanced", key="reset_prioritization"):
+                # Clear the widget key as well — Streamlit ignores `value=` once a
+                # widget key lives in session_state, so we must reset it explicitly
+                # or the stale text persists through the rerun.
+                st.session_state.prioritization_input = ""
+                st.session_state.prioritization_text = ""
+                st.session_state.prioritization_intent = BALANCED_INTENT
+                load_and_plan.clear()
+                st.rerun()
+
+    st.markdown("")
     st.divider()
 
     # -----------------------------------------------------------------------
@@ -415,7 +436,7 @@ with tab_pipeline:
                     load_and_plan.clear()
                     st.rerun()
             else:
-                st.info("Rule-based (instant · use sliders to adjust weights)")
+                st.info("Rule-based (instant · steered by the prioritization goal above)")
                 if st.button("Run AI analysis with Devin", key="run_analysis_devin",
                              help="One Devin session normalises labels AND ranks by business impact (~5 min)"):
                     with st.spinner("Devin is analysing issues… (~5 min)"):
@@ -943,6 +964,59 @@ with tab_business:
         f"{len(merged_30d)}",
         f"{len(devin_merged_30d)} Devin-authored",
     )
+
+    st.markdown("")
+
+    # -----------------------------------------------------------------------
+    # Issues resolved per day — moved here from the Pipeline tab so the
+    # pipeline workflow stays focused on steering the Planner.
+    # -----------------------------------------------------------------------
+
+    resolved_col, resolved_info = st.columns([6, 4])
+    with resolved_col:
+        st.subheader("Issues resolved · last 30 days")
+    with resolved_info:
+        st.caption(
+            f"Source: closed issues in `sarahmoooree-builds/finserv-platform`. "
+            f"{len(merged_30d)} PR(s) merged in the same window."
+        )
+
+    if closed_30d:
+        rows = []
+        for c in closed_30d:
+            try:
+                dt = datetime.fromisoformat(c["closed_at"].replace("Z", "+00:00"))
+            except Exception:
+                continue
+            rows.append(dt.date())
+
+        today = datetime.now(timezone.utc).date()
+        start = today - timedelta(days=29)
+        day_index = {start + timedelta(days=i): 0 for i in range(30)}
+        for d in rows:
+            if d in day_index:
+                day_index[d] += 1
+
+        resolved_df = pd.DataFrame(
+            [{"Day": d.isoformat(), "Resolved": n} for d, n in day_index.items()]
+        )
+        resolved_chart = (
+            alt.Chart(resolved_df)
+            .mark_bar(color="#1B7A8E")
+            .encode(
+                x=alt.X("Day:T", axis=alt.Axis(title=None, format="%b %d", labelAngle=0)),
+                y=alt.Y("Resolved:Q", title="Issues closed"),
+                tooltip=["Day:T", "Resolved:Q"],
+            )
+            .properties(height=230)
+        )
+        st.altair_chart(resolved_chart, use_container_width=True)
+    else:
+        st.info(
+            "No issues have been closed in the last 30 days on the target repo — "
+            "so there is no real trend to plot yet. The live metrics above are grounded "
+            "in live counts; this chart will populate as issues are resolved."
+        )
 
     st.markdown("")
 
