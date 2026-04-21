@@ -35,6 +35,7 @@ from planner import (
     analyse_issues_with_devin,
     migrate_legacy_score,
     reorder_by_tier,
+    rescore_with_strategy,
     BUSINESS_LABELS,
 )
 from priorities import (
@@ -168,13 +169,14 @@ def load_and_plan(intent: str, ingest_mode: str, planner_mode: str,
                 rec["planner_score"] = migrate_legacy_score(
                     rec.get("planner_score", {}) or {}
                 )
-            # Match the rule-based path: tier ascending (T1 first), then
-            # score_within_tier descending, re-assigning priority_rank so the
-            # UI "Priority: #N" badge matches the visible order.
-            ordered = reorder_by_tier(records)
+            # Re-apply the active strategy's tier policy and weights against
+            # Devin's per-dimension scores so switching goals produces
+            # genuinely different rankings instead of returning the frozen
+            # ordering from the original Devin session.
+            rescore_with_strategy(records, strategy)
             if refinement:
-                ordered = apply_refinement(ordered, refinement)
-            return ordered
+                records = apply_refinement(records, refinement)
+            return records
 
     if ingest_mode == "devin":
         ingested = store.all_records("ingested")
