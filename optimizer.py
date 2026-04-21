@@ -711,14 +711,16 @@ def _normalise_devin_record(
     return {
         "issue_id": execution["issue_id"],
         "planned_score": devin_rec.get("planned_score") or planner_score,
-        "scope_confidence": int(devin_rec.get("scope_confidence", scope_confidence) or 0),
+        "scope_confidence": _coerce_optional_int(
+            devin_rec.get("scope_confidence", scope_confidence)
+        ) or 0,
         "actual_status": status,
-        "actual_pr_count": int(
-            devin_rec.get("actual_pr_count", len(execution.get("pull_requests", []))) or 0
-        ),
+        "actual_pr_count": _coerce_optional_int(
+            devin_rec.get("actual_pr_count", len(execution.get("pull_requests", [])))
+        ) or 0,
         "estimation_accuracy": accuracy,
-        "lines_delta": int(devin_rec.get("lines_delta", 0) or 0),
-        "files_delta": int(devin_rec.get("files_delta", 0) or 0),
+        "lines_delta": _coerce_optional_int(devin_rec.get("lines_delta", 0)) or 0,
+        "files_delta": _coerce_optional_int(devin_rec.get("files_delta", 0)) or 0,
         "pattern_tags": [str(t) for t in tags],
         "optimizer_notes": notes or "Devin optimizer produced no commentary.",
         "optimizer_mode": "devin",
