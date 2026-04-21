@@ -232,8 +232,18 @@ planned_issues = load_and_plan(
     st.session_state.prioritization_intent, ingest_mode, planner_mode,
     st.session_state.get("refinement_text", ""),
 )
-auto_recommended = [i for i in planned_issues if i["planner_score"]["recommended"]]
-manual_recommended = [i for i in planned_issues if not i["planner_score"]["recommended"]]
+# Issues that have already been dispatched to the Executor leave the
+# "Recommended for …" lists and move into the Execution pipeline below —
+# they are no longer actionable from the recommendations section.
+_dispatched_ids = {int(e["issue_id"]) for e in store.all_executions()}
+auto_recommended = [
+    i for i in planned_issues
+    if i["planner_score"]["recommended"] and i["id"] not in _dispatched_ids
+]
+manual_recommended = [
+    i for i in planned_issues
+    if not i["planner_score"]["recommended"] and i["id"] not in _dispatched_ids
+]
 
 if "selected_ids" not in st.session_state:
     st.session_state.selected_ids = set()
@@ -984,7 +994,8 @@ with tab_pipeline:
         st.divider()
         st.subheader("Execution pipeline")
         st.caption(
-            "Devin execution sessions dispatched from this app. "
+            "Devin execution sessions dispatched from this app. Completed "
+            "work moves here out of the Recommended lists above. "
             "Use refresh to pull the latest status from the Devin API."
         )
 
@@ -1004,18 +1015,52 @@ with tab_pipeline:
             "Blocked":         "blocked",
         }
 
-        for session in all_sessions:
-            status = session["status"]
-            status_key = EXEC_STATUS_MAP.get(status, "in_progress")
-            issue_id = session["issue_id"]
+        # Lookup planner-enriched metadata (title, score, labels) by issue id.
+        _planned_by_id = {i["id"]: i for i in planned_issues}
 
-            st.markdown(
-                f"<div style='margin-top:4px;margin-bottom:-6px;'>"
-                f"{badge_html(status_key)}</div>",
-                unsafe_allow_html=True,
-            )
-            with st.expander(f"Issue #{issue_id}"):
+        # Group sessions by status so "Completed" is visually distinct.
+        # Render order: Completed → Awaiting review → In progress → Blocked.
+        GROUP_ORDER = [
+            ("Completed", "completed",
+             "Devin finished and opened a pull request."),
+            ("Awaiting Review", "awaiting_review",
+             "Devin finished but may need human follow-up."),
+            ("In Progress", "in_progress",
+             "Devin is still working on these issues."),
+            ("Blocked", "blocked",
+             "Devin could not proceed — human input required."),
+        ]
+
+        _opt_ids = {int(r["issue_id"]) for r in all_optimizations()}
+
+        def _render_session_expander(session: dict) -> None:
+            """Render a single execution session inside its group."""
+            issue_id = session["issue_id"]
+            planned = _planned_by_id.get(issue_id, {})
+            title = planned.get("title", "")
+            header = f"Issue #{issue_id}" + (f" — {title}" if title else "")
+
+            with st.expander(header):
                 st.markdown(f"**Outcome:** {session['outcome_summary']}")
+
+                # Surface completion time when we have it.
+                completed_at = session.get("completed_at")
+                if completed_at:
+                    st.caption(f"Completed at {completed_at[:19].replace('T', ' ')}")
+
+                # Estimated vs. actual-ish surface: planner/scope estimates
+                # that will feed the Optimizer comparison.
+                est_lines = session.get("estimated_lines_changed")
+                est_files = session.get("estimated_files") or []
+                if est_lines or est_files:
+                    parts = []
+                    if est_lines:
+                        parts.append(f"~{est_lines} lines")
+                    if est_files:
+                        parts.append(f"{len(est_files)} file(s) in scope")
+                    if parts:
+                        st.caption("Scope estimate: " + " · ".join(parts))
+
                 if session.get("session_url"):
                     st.markdown(f"[Open executor session]({session['session_url']})")
 
@@ -1023,11 +1068,59 @@ with tab_pipeline:
                 if sp and sp.get("session_url"):
                     st.markdown(f"[View scope session]({sp['session_url']})")
 
+                # Pull requests: prefer PRs tracked on the session itself;
+                # fall back to open PRs whose title mentions the issue id.
+                session_prs = session.get("pull_requests") or []
                 matching_prs = [p for p in open_prs if f"#{issue_id}" in p.get("title", "")]
-                if matching_prs:
+                if session_prs or matching_prs:
                     st.markdown("**Pull requests:**")
+                    seen_urls = set()
+                    for pr in session_prs:
+                        url = pr.get("url") or pr.get("html_url")
+                        if not url or url in seen_urls:
+                            continue
+                        seen_urls.add(url)
+                        pr_title = pr.get("title") or f"PR #{pr.get('number', '?')}"
+                        pr_state = pr.get("state") or "open"
+                        st.markdown(f"- [{pr_title}]({url}) — `{pr_state}`")
                     for pr in matching_prs:
+                        if pr["url"] in seen_urls:
+                            continue
+                        seen_urls.add(pr["url"])
                         st.markdown(f"- [{pr['title']}]({pr['url']}) — `{pr['state']}`")
+
+        for status, status_key, description in GROUP_ORDER:
+            group = [s for s in all_sessions if s["status"] == status]
+            if not group:
+                continue
+
+            st.markdown(
+                f"<div style='margin-top:0.9rem;margin-bottom:0.15rem;'>"
+                f"{badge_html(status_key)} "
+                f"<span style='opacity:0.75;margin-left:0.35rem;'>"
+                f"{len(group)} issue(s)</span></div>",
+                unsafe_allow_html=True,
+            )
+            st.caption(description)
+
+            for session in group:
+                _render_session_expander(session)
+
+            # Guide the user to the Optimizer right after Completed sessions.
+            if status == "Completed":
+                unanalysed = [s for s in group if s["issue_id"] not in _opt_ids]
+                if unanalysed:
+                    st.info(
+                        f"**Next step — Optimizer.** {len(unanalysed)} completed "
+                        f"session(s) haven't been analysed yet. Scroll to "
+                        f"**Optimizer** below to compare scope estimates vs. "
+                        f"actual effort and surface recurring patterns."
+                    )
+                else:
+                    st.caption(
+                        "All completed sessions have been analysed by the "
+                        "Optimizer below."
+                    )
 
     # -----------------------------------------------------------------------
     # Optimizer
