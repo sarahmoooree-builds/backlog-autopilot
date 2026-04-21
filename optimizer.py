@@ -448,14 +448,14 @@ def run_optimizer_with_devin() -> list:
             timeout=30,
         )
     except requests.exceptions.RequestException as e:
-        return _save_pending_errors(
-            executions, "", "", f"Could not reach Devin API: {str(e)}"
-        )
+        # No records have been persisted yet, so nothing to clean up. Raising
+        # ensures the caller (app.py) surfaces the error instead of silently
+        # caching a failure that would block future retries.
+        raise RuntimeError(f"Could not reach Devin API: {str(e)}") from e
 
     if response.status_code not in (200, 201):
-        return _save_pending_errors(
-            executions, "", "",
-            f"API returned {response.status_code}: {response.text[:200]}",
+        raise RuntimeError(
+            f"Devin API returned {response.status_code}: {response.text[:200]}"
         )
 
     session_data = response.json()
@@ -463,9 +463,7 @@ def run_optimizer_with_devin() -> list:
     session_url = session_data.get("url", f"https://app.devin.ai/sessions/{session_id}")
 
     if not session_id:
-        return _save_pending_errors(
-            executions, "", "", "No session_id returned from Devin API"
-        )
+        raise RuntimeError("No session_id returned from Devin API")
 
     print(f"[optimizer] Session created: {session_url}")
 
@@ -477,36 +475,47 @@ def run_optimizer_with_devin() -> list:
         )
 
     # --- Step 4: poll until Devin finishes ---
-    result = _poll_until_done(session_id, headers)
-    if not result:
-        return _save_pending_errors(
-            executions, session_id, session_url,
-            f"Devin session timed out after {OPTIMIZER_TIMEOUT // 60} minutes. "
-            f"Session: {session_url}",
+    try:
+        result = _poll_until_done(session_id, headers)
+        if not result:
+            raise RuntimeError(
+                f"Devin session timed out after {OPTIMIZER_TIMEOUT // 60} minutes. "
+                f"Session: {session_url}"
+            )
+
+        final_status = (result.get("status") or "").lower()
+        final_detail = (result.get("status_detail") or "").lower()
+        has_structured_output = bool(result.get("structured_output"))
+        print(
+            f"[optimizer] Session terminal state: status={final_status!r} "
+            f"detail={final_detail!r} structured_output_present={has_structured_output}"
         )
 
-    final_status = (result.get("status") or "").lower()
-    final_detail = (result.get("status_detail") or "").lower()
-    has_structured_output = bool(result.get("structured_output"))
-    print(
-        f"[optimizer] Session terminal state: status={final_status!r} "
-        f"detail={final_detail!r} structured_output_present={has_structured_output}"
-    )
-
-    # --- Step 5: pull messages + extract the JSON array ---
-    messages = _fetch_messages(session_id, headers)
-    print(
-        f"[optimizer] Fetched {len(messages)} message(s) "
-        f"(devin-authored: {sum(1 for m in messages if (m.get('source') or '').lower() == 'devin')})"
-    )
-
-    records = _extract_optimizer_json(result, messages)
-    if not records:
-        return _save_pending_errors(
-            executions, session_id, session_url,
-            "Devin finished but optimizer JSON array could not be parsed. "
-            f"Session: {session_url}",
+        # --- Step 5: pull messages + extract the JSON array ---
+        messages = _fetch_messages(session_id, headers)
+        print(
+            f"[optimizer] Fetched {len(messages)} message(s) "
+            f"(devin-authored: {sum(1 for m in messages if (m.get('source') or '').lower() == 'devin')})"
         )
+
+        records = _extract_optimizer_json(result, messages)
+        if not records:
+            raise RuntimeError(
+                "Devin finished but optimizer JSON array could not be parsed. "
+                f"Session: {session_url}"
+            )
+    except Exception:
+        # Clean up pending placeholders so the issues remain eligible for
+        # future optimizer runs (rule-based or Devin-powered). Without this,
+        # a single transient failure would permanently block re-analysis.
+        for ex in executions:
+            existing = store.get_optimization(ex["issue_id"])
+            if existing and existing.get("optimizer_mode") == "devin" and \
+                    existing.get("session_id") == session_id and \
+                    (existing.get("optimizer_notes") or "").startswith(
+                        "Devin optimizer analysis in progress"):
+                store.clear_optimization(ex["issue_id"])
+        raise
 
     # --- Step 6: persist one enriched record per issue ---
     by_id = {int(r.get("issue_id")): r for r in records if "issue_id" in r}
@@ -640,41 +649,6 @@ def _pending_devin_record(ex: dict, session_id: str, session_url: str) -> dict:
         "failure_root_cause": None,
         "analyzed_at": datetime.now().isoformat(),
     }
-
-
-def _save_pending_errors(
-    executions: list,
-    session_id: str,
-    session_url: str,
-    error_msg: str,
-) -> list:
-    """On API failure / timeout, save a minimal error record for each issue."""
-    print(f"[optimizer] {error_msg}")
-    now = datetime.now().isoformat()
-    saved = []
-    for ex in executions:
-        record = {
-            "issue_id": ex["issue_id"],
-            "planned_score": {},
-            "scope_confidence": 0,
-            "actual_status": ex.get("status", ""),
-            "actual_pr_count": len(ex.get("pull_requests", [])),
-            "estimation_accuracy": "accurate",
-            "lines_delta": 0,
-            "files_delta": 0,
-            "pattern_tags": [],
-            "optimizer_notes": f"Devin optimizer failed: {error_msg}",
-            "optimizer_mode": "devin",
-            "session_id": session_id or None,
-            "session_url": session_url or None,
-            "actual_lines_changed": None,
-            "actual_files_changed": None,
-            "failure_root_cause": None,
-            "analyzed_at": now,
-        }
-        store.set_optimization(ex["issue_id"], record)
-        saved.append(record)
-    return saved
 
 
 def _normalise_devin_record(

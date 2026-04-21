@@ -167,8 +167,8 @@ class ExecutionSession(TypedDict):
 # Retrospective analysis comparing plan vs. reality.
 # ---------------------------------------------------------------------------
 
-class OptimizationRecord(TypedDict, total=False):
-    # Always-present fields
+class _OptimizationRecordBase(TypedDict):
+    # Required on every record, regardless of optimizer_mode.
     issue_id: int
     planned_score: dict             # PlannerScore snapshot
     scope_confidence: int           # confidence_score from ScopePlan
@@ -182,7 +182,9 @@ class OptimizationRecord(TypedDict, total=False):
     analyzed_at: str
     optimizer_mode: str             # "rule" | "devin"
 
-    # Devin-powered path only (absent / None for rule-based records)
+
+class OptimizationRecord(_OptimizationRecordBase, total=False):
+    # Devin-powered path only (absent / None for rule-based records).
     session_id: Optional[str]       # Devin session id
     session_url: Optional[str]      # Devin session url
     actual_lines_changed: Optional[int]   # real diff stats from PR
