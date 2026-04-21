@@ -563,6 +563,27 @@ with tab_pipeline:
         i["id"] for i in planned_issues
         if derive_status(i["id"]) == "not_scoped" and not store.is_dispatched(i["id"])
     }
+
+    # Reconcile `selected_ids` from each enabled-path checkbox's widget state
+    # *before* the action row is drawn. The issue rows further below
+    # (render_issue_row) read each widget back into `selected_ids`, but that
+    # happens after the action row has already been rendered, so without this
+    # pass the Clear / Scope / Run buttons would evaluate `selected_ids` from
+    # the previous rerun and show stale disabled/enabled state on the first
+    # click — the "click twice to see the button light up" symptom.
+    for _issue in planned_issues:
+        _iid = _issue["id"]
+        if store.is_dispatched(_iid):
+            continue
+        if derive_status(_iid) in DISABLED_CHECKBOX_STATUSES:
+            continue
+        _key = f"select_{_iid}"
+        if _key in st.session_state:
+            if st.session_state[_key]:
+                st.session_state.selected_ids.add(_iid)
+            else:
+                st.session_state.selected_ids.discard(_iid)
+
     currently_selected = st.session_state.selected_ids & selectable_ids
 
     # --- Action row ---
