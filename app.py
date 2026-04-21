@@ -972,7 +972,8 @@ with tab_business:
             )
             issues_per_wk_before = st.number_input(
                 "Issues closed per week (baseline)",
-                min_value=1, max_value=200, value=max(1, len(closed_30d) // 4 or 8),
+                min_value=1, max_value=200,
+                value=max(1, len(closed_30d) // 4) if closed_30d else 8,
             )
         with ast3:
             issues_per_wk_after = st.number_input(
