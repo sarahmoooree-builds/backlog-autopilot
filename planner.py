@@ -242,7 +242,8 @@ def recommend(total_score: float, issue: dict) -> tuple:
 # ---------------------------------------------------------------------------
 
 def plan_issues(ingested: list, weights: dict = None,
-                strategy: PlannerStrategy = None) -> list:
+                strategy: PlannerStrategy = None,
+                notify: bool = True) -> list:
     """
     Stage 2: Planner.
 
@@ -257,6 +258,11 @@ def plan_issues(ingested: list, weights: dict = None,
         - `weights`: raw weight dict (legacy). Used when `strategy` is None.
 
     When both are omitted the balanced default is applied.
+
+    If ``notify`` is False the planner skips the approval-needed Slack
+    notification. Callers that emit their own, richer notification for the
+    same event (e.g. ``cli.py rescore``) should pass ``notify=False`` to
+    avoid sending two Slack messages for the same issue.
     """
     if strategy is None and weights is None:
         strategy = get_strategy(BALANCED_INTENT)
@@ -303,7 +309,8 @@ def plan_issues(ingested: list, weights: dict = None,
     for rank, issue in enumerate(scored, start=1):
         issue["planner_score"]["priority_rank"] = rank
 
-    _notify_newly_recommended(scored)
+    if notify:
+        _notify_newly_recommended(scored)
 
     return scored
 

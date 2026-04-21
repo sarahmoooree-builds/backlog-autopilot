@@ -156,7 +156,10 @@ def cmd_rescore(args: argparse.Namespace) -> int:
 
     peers = store.all_records("ingested") or [ingested]
     strategy = get_strategy(BALANCED_INTENT)
-    planned = plan_issues(peers, strategy=strategy)
+    # notify=False: rescore emits its own richer per-issue Slack message
+    # below, so we suppress the batch approval-needed notification that
+    # plan_issues would otherwise send.
+    planned = plan_issues(peers, strategy=strategy, notify=False)
     _persist_planned(planned)
 
     updated = next((p for p in planned if int(p["id"]) == int(issue_id)), None)
@@ -171,11 +174,20 @@ def cmd_rescore(args: argparse.Namespace) -> int:
     )
 
     if score["recommended"]:
-        notify_new_recommended_issue(
+        sent = notify_new_recommended_issue(
             issue_id=issue_id,
             title=updated.get("title", ""),
             score=score["total_score"],
         )
+        # Record this issue in the notifications meta so a later
+        # cmd_plan run doesn't treat it as "newly recommended" and
+        # fire a second Slack message.
+        if sent:
+            meta = store.get_pipeline_meta("notifications") or {}
+            already = set(meta.get("notified_approval_ids", []))
+            already.add(int(issue_id))
+            meta["notified_approval_ids"] = sorted(already)
+            store.set_pipeline_meta("notifications", meta)
     return 0
 
 
