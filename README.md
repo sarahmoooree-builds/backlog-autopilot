@@ -1,5 +1,7 @@
 # Backlog Autopilot
 
+**Demo walkthrough:** [Loom video](https://www.loom.com/share/6a8c27542a3d4ba999d33ca9ca8bbdf5)
+
 A 5-stage multi-agent pipeline that turns a wall of stale GitHub issues into an autonomous
 resolution system — with explicit human approval checkpoints and a feedback loop that learns
 from outcomes.
@@ -140,10 +142,6 @@ without a human selecting issues and clicking "Scope selected issues".
 root_cause_hypothesis, affected_files, estimated_lines_changed, task_breakdown,
 dependencies, risks, session_id, session_url, scope_status, error, scoped_at
 
-> **Backwards compatibility:** the JSON section name remains `architect_plans` and
-> records are normalised on read, so existing data keeps working. `ArchitectPlan`
-> is re-exported as an alias of `ScopePlan`.
-
 ---
 
 ### Checkpoint 3.5: Human Review
@@ -226,25 +224,6 @@ All schemas are defined in `schemas.py`.
 
 ---
 
-## File Reference
-
-| New File | Replaces | Stage |
-|----------|----------|-------|
-| `schemas.py` | — | All stages (canonical TypedDicts) |
-| `store.py` | `state.py` + `triage_store.py` | All stages (unified persistence) |
-| `ingest.py` | `scorer.py` (partial) | Stage 1: Ingest |
-| `planner.py` | `scorer.py` (partial) | Stage 2: Planner |
-| `scope.py` | `triager.py` / `architect.py` | Stage 3: Scope |
-| `prompts.py` | `prompts.py` | Stages 3 + 4 (expanded) |
-| `executor.py` | `executor.py` | Stage 4: Executor |
-| `optimizer.py` | — | Stage 5: Optimizer |
-| `app.py` | `app.py` | UI (full overhaul) |
-| `github_client.py` | — | Data source (unchanged) |
-
-**Deleted:** `mock_executor.py`, `triage_store.py`, `state.py`, `scorer.py`, `triager.py`
-
----
-
 ## Devin Subagents
 
 | Stage | Python Module | Devin Subagent |
@@ -274,16 +253,12 @@ All pipeline state is stored in a single JSON file with 7 sections:
   "ingested":        { "<issue_id>": "IngestedIssue" },
   "planned":         { "<issue_id>": "PlannedIssue" },
   "approvals":       { "<issue_id>": "ApprovalRecord" },
-  "architect_plans": { "<issue_id>": "ScopePlan" },   // section name kept for backward-compat
+  "architect_plans": { "<issue_id>": "ScopePlan" },
   "reviews":         { "<issue_id>": "ReviewRecord" },
   "executions":      { "<issue_id>": "ExecutionSession" },
   "optimizations":   { "<issue_id>": "OptimizationRecord" }
 }
 ```
-
-**Migration:** `store.migrate_legacy_stores()` runs at app startup and automatically imports
-data from the old `sessions.json` and `triage_store.json` files if they exist. Safe to call
-repeatedly — no-op if already migrated.
 
 ---
 
@@ -328,22 +303,3 @@ Workflow: **review issues → select any issues → scope → approve → run ex
 9. Once sessions reach a terminal state, click **"Run optimizer"** (Stage 5) to analyse outcomes.
 10. **Business Report** tab: live backlog metrics + clearly-labelled projections (assumptions editable).
 
----
-
-## What Changed from v1 (3-Stage Pipeline)
-
-| v1 File | v2 File | What Changed |
-|---------|---------|--------------|
-| `scorer.py` | `ingest.py` + `planner.py` | Split: Ingest classifies; Planner scores and ranks |
-| `triager.py` | `scope.py` | Renamed (v2 → v3: `architect.py` → `scope.py`); `next_steps` → `task_breakdown`; adds `dependencies` + `risks` |
-| `state.py` | `store.py` | Unified with triage store; 7-section JSON; migration included |
-| `triage_store.py` | `store.py` | Merged into unified store |
-| `mock_executor.py` | Deleted | Unused |
-| `executor.py` | `executor.py` | Now requires ScopePlan; carries estimates to ExecutionSession |
-| `prompts.py` | `prompts.py` | Added `SCOPE_PROMPT`; expanded `EXECUTION_PROMPT` with plan fields |
-| `app.py` | `app.py` | Unified issue list with grouped recommendations; "Scope selected issues" CTA; real-data KPIs and chart; clearly-labelled business projections; Checkpoints 2.5 + 3.5; Optimizer panel |
-| — | `schemas.py` | New: canonical TypedDicts for every stage handoff |
-| — | `optimizer.py` | New: Stage 5 outcome analysis and heuristic recommendations |
-| — | `issue-planner/AGENT.md` | New subagent definition in finserv-platform |
-| — | `issue-architect/AGENT.md` | New subagent definition in finserv-platform |
-| — | `issue-optimizer/AGENT.md` | New subagent definition in finserv-platform |
