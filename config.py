@@ -74,6 +74,13 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 # Concurrency
 DEVIN_MAX_CONCURRENT_SESSIONS = int(os.getenv("DEVIN_MAX_CONCURRENT_SESSIONS", "5"))
 
+# Slack notifications (optional — empty disables all Slack sends)
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
+
+# Public URL of the Streamlit app. Embedded in Slack messages so approvers
+# can click straight into the approval queue. Safe to leave empty.
+STREAMLIT_APP_URL = os.getenv("STREAMLIT_APP_URL", "")
+
 
 # ---------------------------------------------------------------------------
 # Shared HTTP session with automatic retry on transient failures

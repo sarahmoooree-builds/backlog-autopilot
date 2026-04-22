@@ -1,0 +1,51 @@
+# Sample forwarder workflow.
+#
+# Install this file as `.github/workflows/backlog-autopilot-forwarder.yml` in
+# the repository that Backlog Autopilot monitors (i.e. the repo configured as
+# `TARGET_REPO`, typically `sarahmoooree-builds/finserv-platform`). It forwards
+# `issues` events to backlog-autopilot via `repository_dispatch`, where the
+# `Issue Webhook Handler` workflow picks them up and reruns the planner for the
+# changed issue.
+#
+# Required secret on the TARGET_REPO:
+#   BACKLOG_AUTOPILOT_DISPATCH_TOKEN — a PAT (or fine-grained token) with
+#     `repo` scope on sarahmoooree-builds/backlog-autopilot. Needed because
+#     the default GITHUB_TOKEN cannot dispatch events across repositories.
+
+name: Forward issue events to Backlog Autopilot
+
+on:
+  issues:
+    types: [opened, labeled, edited]
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Map event action to dispatch type
+        id: map
+        run: |
+          case "${{ github.event.action }}" in
+            opened)  echo "event_type=issue-opened"  >> "$GITHUB_OUTPUT" ;;
+            labeled) echo "event_type=issue-labeled" >> "$GITHUB_OUTPUT" ;;
+            edited)  echo "event_type=issue-edited"  >> "$GITHUB_OUTPUT" ;;
+            *)       echo "event_type=issue-updated" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Send repository_dispatch to backlog-autopilot
+        env:
+          DISPATCH_TOKEN: ${{ secrets.BACKLOG_AUTOPILOT_DISPATCH_TOKEN }}
+        run: |
+          curl -sSf -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $DISPATCH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/sarahmoooree-builds/backlog-autopilot/dispatches \
+            -d '{
+              "event_type": "${{ steps.map.outputs.event_type }}",
+              "client_payload": {
+                "issue_number": ${{ github.event.issue.number }},
+                "source_repo": "${{ github.repository }}",
+                "action": "${{ github.event.action }}"
+              }
+            }'

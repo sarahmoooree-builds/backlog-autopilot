@@ -1,0 +1,70 @@
+name: Issue Webhook Handler
+
+# Triggered by a `repository_dispatch` sent from the monitored TARGET_REPO
+# (e.g. sarahmoooree-builds/finserv-platform) whenever an issue is opened,
+# labelled, or edited. We intentionally do NOT use the `issues:` trigger here
+# because this workflow lives in the backlog-autopilot repo while the issues
+# we care about live in TARGET_REPO — using `issues:` would cause this to fire
+# on backlog-autopilot's own issues and pass the wrong issue number to the CLI.
+#
+# See `.github/workflows/samples/forwarder.yml` for the companion workflow
+# that should be installed in TARGET_REPO to forward issue events.
+
+on:
+  repository_dispatch:
+    types: [issue-opened, issue-labeled, issue-edited]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number in TARGET_REPO to rescore'
+        required: true
+        type: number
+
+concurrency:
+  # Serialise webhook handling per issue so two rapid edits don't race.
+  group: backlog-autopilot-webhook-${{ github.event.client_payload.issue_number || github.event.inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  handle-issue:
+    name: Re-ingest and rescore issue
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DEVIN_API_KEY: ${{ secrets.DEVIN_API_KEY }}
+      DEVIN_ORG_ID: ${{ secrets.DEVIN_ORG_ID }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      STREAMLIT_APP_URL: ${{ secrets.STREAMLIT_APP_URL }}
+      TARGET_REPO: ${{ vars.TARGET_REPO || 'sarahmoooree-builds/finserv-platform' }}
+      ISSUE_NUMBER: ${{ github.event.client_payload.issue_number || github.event.inputs.issue_number }}
+    steps:
+      - name: Validate issue number
+        run: |
+          if [ -z "$ISSUE_NUMBER" ]; then
+            echo "::error::No issue number provided in client_payload or workflow_dispatch inputs."
+            exit 1
+          fi
+          echo "Processing issue #$ISSUE_NUMBER from $TARGET_REPO"
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Re-ingest from GitHub
+        run: python cli.py ingest
+
+      - name: Rescore changed issue
+        # cli.py rescore sends a Slack notification when the issue crosses
+        # RECOMMEND_THRESHOLD, satisfying the "notify above threshold" step.
+        run: python cli.py rescore --issue-id "$ISSUE_NUMBER"

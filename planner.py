@@ -28,7 +28,9 @@ import requests
 from datetime import datetime
 
 import devin_client
+import store
 from config import PLANNER_TIMEOUT, POLL_INTERVAL
+from notifications import notify_approval_needed
 from priorities import PlannerStrategy, get_strategy, BALANCED_INTENT
 
 logger = logging.getLogger(__name__)
@@ -435,7 +437,8 @@ def _score_issue(issue: dict) -> dict:
 
 
 def plan_issues(ingested: list, weights: dict = None,
-                strategy: PlannerStrategy = None) -> list:
+                strategy: PlannerStrategy = None,
+                notify: bool = True) -> list:
     """
     Stage 2: Planner.
 
@@ -450,6 +453,11 @@ def plan_issues(ingested: list, weights: dict = None,
           strategy the balanced tier policy is used.
 
     When both are omitted the balanced default is applied.
+
+    If ``notify`` is False the planner skips the approval-needed Slack
+    notification. Callers that emit their own, richer notification for the
+    same event (e.g. ``cli.py rescore``) should pass ``notify=False`` to
+    avoid sending two Slack messages for the same issue.
     """
     if strategy is None:
         strategy = get_strategy(BALANCED_INTENT)
@@ -504,7 +512,36 @@ def plan_issues(ingested: list, weights: dict = None,
     # Primary sort is tier (ascending — T1 first); within a tier,
     # higher score_within_tier wins.
     reorder_by_tier(scored)
+
+    if notify:
+        _notify_newly_recommended(scored)
+
     return scored
+
+
+def _notify_newly_recommended(scored: list) -> None:
+    """Send an approval-needed Slack notification for any issue that crossed
+    ``RECOMMEND_THRESHOLD`` since the last time we planned. Newly-recommended
+    IDs are tracked in ``pipeline_meta`` so repeat calls from the Streamlit
+    cache don't re-notify on every 60-second refresh.
+    """
+    recommended_ids = sorted(
+        issue["id"] for issue in scored
+        if issue["planner_score"]["recommended"]
+    )
+    if not recommended_ids:
+        return
+
+    meta = store.get_pipeline_meta("notifications") or {}
+    already = set(meta.get("notified_approval_ids", []))
+    new_ids = [i for i in recommended_ids if i not in already]
+    if not new_ids:
+        return
+
+    if notify_approval_needed(new_ids):
+        meta["notified_approval_ids"] = sorted(already | set(new_ids))
+        meta["last_notified_at"] = datetime.now().isoformat()
+        store.set_pipeline_meta("notifications", meta)
 
 
 def reorder_by_tier(issues: list) -> list:
