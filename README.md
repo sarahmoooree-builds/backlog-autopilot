@@ -1,5 +1,7 @@
 # Backlog Autopilot
 
+**Demo walkthrough:** [Loom video](https://www.loom.com/share/6a8c27542a3d4ba999d33ca9ca8bbdf5)
+
 A 5-stage multi-agent pipeline that turns a wall of stale GitHub issues into an autonomous
 resolution system — with explicit human approval checkpoints and a feedback loop that learns
 from outcomes.
@@ -31,7 +33,7 @@ GitHub Issues
          ▼
 ┌─────────────────┐
 │  Stage 2        │  planner.py
-│  PLANNER        │  Score, rank, prioritise (rule-based, PM-configurable weights)
+│  PLANNER        │  Score on 6 dimensions, assign tier (T1–T4), rank
 └────────┬────────┘
          │ PlannedIssue
          ▼
@@ -67,7 +69,7 @@ GitHub Issues
 └─────────────────┘
          │ OptimizationRecord
          ▼
-  Heuristic recommendations fed back into Planner weights
+  Heuristic recommendations surfaced in the UI to adjust Planner policy
 ```
 
 ---
@@ -92,18 +94,27 @@ summary, issue_type, complexity, scope, risk, duplicate_of, ingested_at
 ### Stage 2: Planner (`planner.py`)
 
 **What it does:**
-- Scores each issue on four PM-configurable dimensions (0–10 each):
-  - **User impact**: affected users, severity, age, comment volume
-  - **Business impact**: revenue/compliance/customer-facing labels
-  - **Effort** (inverted): complexity × scope → harder = lower score contribution
-  - **Automation confidence**: issue type × complexity → likelihood of autonomous success
-- Computes a weighted total score and assigns a priority rank
-- Recommends issues with `total_score ≥ 6.0` and `risk != "high"` and `type != "investigation"`
+- Scores each issue on six dimensions (0–10 each, higher = better):
+  - **severity** — how bad it is when it happens
+  - **reach** — how many users / customers are affected
+  - **business_value** — revenue / compliance / SLA importance
+  - **ease** — higher = easier to implement
+  - **confidence** — automation likelihood
+  - **urgency** — time pressure (age, SLA, comment velocity)
+- Assigns a policy-driven **tier** (1 = Critical → 4 = Deferred) with a human-readable `tier_reason`
+- Orders issues by `(tier, -score_within_tier)` — tier is the primary ranking axis
+- Recommendation rule (tier-based):
+  - T1 / T2 with `confidence ≥ 3` → recommended
+  - T3 only when `ease ≥ 5` and `confidence ≥ 5` → recommended
+  - T4 → never recommended
+  - Hard blocks regardless of tier: `risk = "high"`, `issue_type = "investigation"`
 - Generates 1–3 plain-English implementation options for recommended issues
 
-**What it does NOT do:** call Devin, write code, open sessions
+**What it does NOT do:** call Devin (in the rule-based path), write code, open sessions
 
-**Configurable:** weights are exposed as sidebar sliders in the UI
+**Configurable:** Planner strategy is steered in plain English from the Pipeline tab
+(goal buttons + freeform refinement). Each strategy bundles the dimension weights
+and tier policy; see `priorities.py`.
 
 **Output schema:** `PlannedIssue` — all IngestedIssue fields + planner_score (PlannerScore),
 implementation_options, planned_at
@@ -139,10 +150,6 @@ without a human selecting issues and clicking "Scope selected issues".
 **Output schema:** `ScopePlan` — issue_id, confidence_score, confidence_reasoning,
 root_cause_hypothesis, affected_files, estimated_lines_changed, task_breakdown,
 dependencies, risks, session_id, session_url, scope_status, error, scoped_at
-
-> **Backwards compatibility:** the JSON section name remains `architect_plans` and
-> records are normalised on read, so existing data keeps working. `ArchitectPlan`
-> is re-exported as an alias of `ScopePlan`.
 
 ---
 
@@ -215,7 +222,7 @@ session_id, session_url, actual_lines_changed, actual_files_changed, failure_roo
 |-------|--------|------------|
 | Raw input | `RawIssue` | id, title, description, labels, age_days, comments_count |
 | Ingest output | `IngestedIssue` | + summary, issue_type, complexity, scope, risk, duplicate_of |
-| Planner output | `PlannedIssue` | + planner_score (PlannerScore), implementation_options |
+| Planner output | `PlannedIssue` | + planner_score (6 dims + tier), implementation_options |
 | Checkpoint 2.5 | `ApprovalRecord` | issue_id, approved, approved_at |
 | Scope output | `ScopePlan` | confidence_score, root_cause_hypothesis, task_breakdown, risks |
 | Checkpoint 3.5 | `ReviewRecord` | review_required, review_approved, review_notes |
@@ -223,25 +230,6 @@ session_id, session_url, actual_lines_changed, actual_files_changed, failure_roo
 | Optimizer output | `OptimizationRecord` | estimation_accuracy, pattern_tags, optimizer_notes |
 
 All schemas are defined in `schemas.py`.
-
----
-
-## File Reference
-
-| New File | Replaces | Stage |
-|----------|----------|-------|
-| `schemas.py` | — | All stages (canonical TypedDicts) |
-| `store.py` | `state.py` + `triage_store.py` | All stages (unified persistence) |
-| `ingest.py` | `scorer.py` (partial) | Stage 1: Ingest |
-| `planner.py` | `scorer.py` (partial) | Stage 2: Planner |
-| `scope.py` | `triager.py` / `architect.py` | Stage 3: Scope |
-| `prompts.py` | `prompts.py` | Stages 3 + 4 (expanded) |
-| `executor.py` | `executor.py` | Stage 4: Executor |
-| `optimizer.py` | — | Stage 5: Optimizer |
-| `app.py` | `app.py` | UI (full overhaul) |
-| `github_client.py` | — | Data source (unchanged) |
-
-**Deleted:** `mock_executor.py`, `triage_store.py`, `state.py`, `scorer.py`, `triager.py`
 
 ---
 
@@ -265,25 +253,26 @@ Subagent definitions are in `finserv-platform/.devin/agents/`:
 
 ---
 
-## Persistence: pipeline_store.json
+## Persistence: pipeline_store.db
 
-All pipeline state is stored in a single JSON file with 7 sections:
+All pipeline state lives in a local SQLite database (`pipeline_store.db`) with one
+table per stage plus a `pipeline_meta` table. Each row has a text primary key
+(`issue_id`) and a JSON blob in `data`, so the dict-based public API in `store.py`
+stays simple while SQLite provides ACID guarantees under Streamlit's threaded model.
 
-```json
-{
-  "ingested":        { "<issue_id>": "IngestedIssue" },
-  "planned":         { "<issue_id>": "PlannedIssue" },
-  "approvals":       { "<issue_id>": "ApprovalRecord" },
-  "architect_plans": { "<issue_id>": "ScopePlan" },   // section name kept for backward-compat
-  "reviews":         { "<issue_id>": "ReviewRecord" },
-  "executions":      { "<issue_id>": "ExecutionSession" },
-  "optimizations":   { "<issue_id>": "OptimizationRecord" }
-}
-```
+| Table | Record type |
+|-------|-------------|
+| `ingested` | `IngestedIssue` |
+| `planned` | `PlannedIssue` |
+| `approvals` | `ApprovalRecord` |
+| `architect_plans` | `ScopePlan` (table name retained from when Stage 3 was "Architect") |
+| `reviews` | `ReviewRecord` |
+| `executions` | `ExecutionSession` |
+| `optimizations` | `OptimizationRecord` |
+| `pipeline_meta` | per-stage run metadata (keyed by `stage`) |
 
-**Migration:** `store.migrate_legacy_stores()` runs at app startup and automatically imports
-data from the old `sessions.json` and `triage_store.json` files if they exist. Safe to call
-repeatedly — no-op if already migrated.
+If an older `pipeline_store.json` is present on first run, `store.py` imports it
+into SQLite on startup and renames it to `pipeline_store.json.migrated`.
 
 ---
 
@@ -313,7 +302,8 @@ streamlit run app.py
 Workflow: **review issues → select any issues → scope → approve → run execution**.
 
 1. Open the app. KPI cards are grounded in the live backlog + resolved-issues data from GitHub.
-2. **Sidebar:** Adjust Planner weights to change issue priority ranking in real time.
+2. **Prioritize:** Click a goal button on the Pipeline tab (or type a freeform intent) to
+   re-rank issues under a new Planner strategy — no manual weight tuning required.
 3. **Issues** panel — Issues are shown in one unified list with two groups:
    - **Recommended for automation** (strong automation candidates)
    - **Recommended for manual handling** (risky, ambiguous, or complex)
@@ -328,22 +318,3 @@ Workflow: **review issues → select any issues → scope → approve → run ex
 9. Once sessions reach a terminal state, click **"Run optimizer"** (Stage 5) to analyse outcomes.
 10. **Business Report** tab: live backlog metrics + clearly-labelled projections (assumptions editable).
 
----
-
-## What Changed from v1 (3-Stage Pipeline)
-
-| v1 File | v2 File | What Changed |
-|---------|---------|--------------|
-| `scorer.py` | `ingest.py` + `planner.py` | Split: Ingest classifies; Planner scores and ranks |
-| `triager.py` | `scope.py` | Renamed (v2 → v3: `architect.py` → `scope.py`); `next_steps` → `task_breakdown`; adds `dependencies` + `risks` |
-| `state.py` | `store.py` | Unified with triage store; 7-section JSON; migration included |
-| `triage_store.py` | `store.py` | Merged into unified store |
-| `mock_executor.py` | Deleted | Unused |
-| `executor.py` | `executor.py` | Now requires ScopePlan; carries estimates to ExecutionSession |
-| `prompts.py` | `prompts.py` | Added `SCOPE_PROMPT`; expanded `EXECUTION_PROMPT` with plan fields |
-| `app.py` | `app.py` | Unified issue list with grouped recommendations; "Scope selected issues" CTA; real-data KPIs and chart; clearly-labelled business projections; Checkpoints 2.5 + 3.5; Optimizer panel |
-| — | `schemas.py` | New: canonical TypedDicts for every stage handoff |
-| — | `optimizer.py` | New: Stage 5 outcome analysis and heuristic recommendations |
-| — | `issue-planner/AGENT.md` | New subagent definition in finserv-platform |
-| — | `issue-architect/AGENT.md` | New subagent definition in finserv-platform |
-| — | `issue-optimizer/AGENT.md` | New subagent definition in finserv-platform |
